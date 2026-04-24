@@ -16,6 +16,7 @@ dependencies = ["pyyaml>=6"]
 
 [project.scripts]
 pipery-actions = "pipery_tooling.cli:main"
+pipery-steps = "pipery_tooling.steps.cli:main"
 
 [dependency-groups]
 dev = ["pytest>=8"]
