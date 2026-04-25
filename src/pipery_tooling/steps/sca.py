@@ -64,12 +64,12 @@ def run(
     entry = json.dumps(
         {"event": "sca", "status": status, "language": language, "tools": tools_run}
     )
-    _write_log_entry(entry, log_file, project_path)
+    _write_log_entry(entry, log_file)
 
     return 1 if failed else 0
 
 
-def _write_log_entry(entry: str, log_file: str, cwd: str) -> None:
+def _write_log_entry(entry: str, log_file: str) -> None:
     try:
         with open(log_file, "a", encoding="utf-8") as fh:
             fh.write(entry + "\n")

@@ -1,0 +1,42 @@
+name: Pipery Release
+
+on:
+  workflow_call:
+    inputs:
+      bump:
+        description: Semver bump kind (patch, minor, or major)
+        required: true
+        type: string
+        default: patch
+      build-command:
+        description: Optional build step to run before release (e.g. "npm ci && npm run build")
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install pipery-tooling
+        run: pip install git+https://github.com/pipery-dev/pipery-tooling.git
+      - name: Build
+        if: ${{ inputs.build-command != '' }}
+        env:
+          BUILD_CMD: ${{ inputs.build-command }}
+        run: eval "$BUILD_CMD"
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      - name: Release
+        run: pipery-actions release --repo . --bump ${{ inputs.bump }} --release-branch --push

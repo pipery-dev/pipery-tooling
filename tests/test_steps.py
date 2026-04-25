@@ -490,11 +490,13 @@ class DeployTests(unittest.TestCase):
 
     def test_deploy_writes_jsonl_entry(self) -> None:
         from pipery_tooling.steps import deploy
+        import os
         with tempfile.TemporaryDirectory() as tmp:
             log = str(Path(tmp) / "deploy.jsonl")
             with patch("pipery_tooling.steps.deploy.subprocess.run") as mock_run:
                 mock_run.return_value = MagicMock(returncode=0)
-                deploy.run("helm", "canary", log)
+                with patch.dict(os.environ, {"HELM_RELEASE": "myrel", "HELM_CHART": "mychart"}):
+                    deploy.run("helm", "canary", log)
             entry = json.loads(Path(log).read_text().strip())
             self.assertEqual(entry["event"], "deploy")
             self.assertEqual(entry["target"], "helm")
@@ -503,14 +505,29 @@ class DeployTests(unittest.TestCase):
 
     def test_deploy_failure_status_in_log(self) -> None:
         from pipery_tooling.steps import deploy
+        import os
         with tempfile.TemporaryDirectory() as tmp:
             log = str(Path(tmp) / "deploy.jsonl")
             with patch("pipery_tooling.steps.deploy.subprocess.run") as mock_run:
                 mock_run.return_value = MagicMock(returncode=1)
-                rc = deploy.run("cloud-run", "rolling", log)
+                with patch.dict(os.environ, {
+                    "CLOUD_RUN_SERVICE": "my-svc",
+                    "CLOUD_RUN_IMAGE": "gcr.io/proj/img:latest",
+                }):
+                    rc = deploy.run("cloud-run", "rolling", log)
             self.assertEqual(rc, 1)
             entry = json.loads(Path(log).read_text().strip())
             self.assertEqual(entry["status"], "failure")
+
+    def test_deploy_missing_required_field_returns_error(self) -> None:
+        from pipery_tooling.steps import deploy
+        import os
+        with tempfile.TemporaryDirectory() as tmp:
+            log = str(Path(tmp) / "deploy.jsonl")
+            # argocd_app not set — should return 1 without calling subprocess
+            with patch.dict(os.environ, {}, clear=True):
+                rc = deploy.run("argocd", "rolling", log)
+            self.assertEqual(rc, 1)
 
     def test_deploy_unsupported_target_returns_error(self) -> None:
         from pipery_tooling.steps import deploy

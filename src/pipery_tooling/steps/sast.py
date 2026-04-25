@@ -58,14 +58,14 @@ def run(
         {"event": "sast", "status": status, "language": language, "tools": tools_run}
     )
     # Write the summary entry via psh (or directly to the log file if psh absent)
-    _write_log_entry(entry, log_file, project_path)
+    _write_log_entry(entry, log_file)
 
     return 1 if failed else 0
 
 
-def _write_log_entry(entry: str, log_file: str, cwd: str) -> None:
-    """Append a JSONL entry to *log_file* (direct write; the individual tool
-    runs have already gone through psh)."""
+def _write_log_entry(entry: str, log_file: str) -> None:
+    """Append a JSONL entry to *log_file* (direct write; individual tool runs
+    have already been logged through psh)."""
     try:
         with open(log_file, "a", encoding="utf-8") as fh:
             fh.write(entry + "\n")

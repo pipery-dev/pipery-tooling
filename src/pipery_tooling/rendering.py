@@ -266,24 +266,13 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Install tooling
-        run: python -m pip install git+https://github.com/{config.owner}/pipery-tooling.git
-      - name: Test action
-        run: pipery-actions test --repo .
-        # Discovers .github/pipery/*_test.yaml and runs the action against each fixture.
+    uses: {config.owner}/pipery-tooling/.github/workflows/pipery-test.yml@v0
 """
 
 
 def render_release_workflow(config: ActionConfig) -> str:
-    build_step = (
-        "      - name: Build\n"
-        "        run: npm ci && npm run build\n"
+    build_command_line = (
+        "\n      build-command: \"npm ci && npm run build\""
         if config.action_type == "javascript"
         else ""
     )
@@ -307,26 +296,9 @@ permissions:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Install tooling
-        run: python -m pip install git+https://github.com/{config.owner}/pipery-tooling.git
-{build_step}      - name: Configure Git
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-      - name: Release
-        run: >
-          pipery-actions release --repo . --bump ${{{{ inputs.bump }}}}
-          --release-branch --push
-        # Creates releases/v{config.major_version} branch with runtime files only, then tags
-        # v{{bump}}, v{{minor}}, v{{major}} pointing at that slim branch commit.
+    uses: {config.owner}/pipery-tooling/.github/workflows/pipery-release.yml@v0
+    with:
+      bump: ${{{{ inputs.bump }}}}{build_command_line}
 """
 
 
