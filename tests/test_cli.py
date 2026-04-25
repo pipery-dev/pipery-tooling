@@ -326,12 +326,18 @@ class PiperyToolingTests(unittest.TestCase):
     def test_copy_runtime_files_composite(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo = self._scaffold(Path(tmpdir))
+            # Add extra step scripts to simulate a multi-step composite action
+            (repo / "src" / "step-lint.sh").write_text("#!/usr/bin/env bash\necho lint\n")
+            (repo / "src" / "step-build.sh").write_text("#!/usr/bin/env bash\necho build\n")
             dest = Path(tmpdir) / "release"
             dest.mkdir()
             config = load_config(repo)
             _copy_runtime_files(repo, dest, config)
             self.assertTrue((dest / "action.yml").exists())
             self.assertTrue((dest / "src" / "main.sh").exists())
+            # All scripts in src/ must be copied, not just main.sh
+            self.assertTrue((dest / "src" / "step-lint.sh").exists())
+            self.assertTrue((dest / "src" / "step-build.sh").exists())
             self.assertTrue((dest / "README.md").exists())
             # dev-only files must NOT be copied
             self.assertFalse((dest / "pipery-action.toml").exists())

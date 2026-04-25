@@ -454,11 +454,13 @@ def _copy_runtime_files(repo_dir: Path, dest: Path, config: ActionConfig) -> Non
         if src.exists():
             shutil.copy2(src, dest / name)
     if config.action_type == "composite":
-        src_impl = repo_dir / "src" / "main.sh"
-        if src_impl.exists():
+        src_dir = repo_dir / "src"
+        if src_dir.exists():
             (dest / "src").mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src_impl, dest / "src" / "main.sh")
-            _make_executable(dest / "src" / "main.sh")
+            for script in src_dir.iterdir():
+                if script.is_file():
+                    shutil.copy2(script, dest / "src" / script.name)
+                    _make_executable(dest / "src" / script.name)
     elif config.action_type == "javascript":
         dist_src = repo_dir / "dist"
         if dist_src.exists():
