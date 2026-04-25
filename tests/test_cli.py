@@ -58,12 +58,12 @@ class PiperyToolingTests(unittest.TestCase):
             self.assertIn("source_path:", content)
             self.assertIn("success_values:", content)
 
-    def test_scaffold_release_workflow_uses_release_branch(self) -> None:
+    def test_scaffold_release_workflow_delegates_to_reusable(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo = self._scaffold(Path(tmpdir))
             workflow = (repo / ".github" / "workflows" / "release.yml").read_text()
-            self.assertIn("--release-branch", workflow)
-            self.assertIn("releases/v", workflow)
+            self.assertIn("pipery-release.yml", workflow)
+            self.assertIn("inputs.bump", workflow)
 
     # ------------------------------------------------------------------
     # test discovery
@@ -116,6 +116,59 @@ class PiperyToolingTests(unittest.TestCase):
             self.assertEqual(spec.log_path, "out.jsonl")
             self.assertEqual(spec.success_values, ["done"])
             self.assertEqual(spec.required_fields, [{"name": "phase", "value": "build"}])
+            self.assertFalse(spec.expect_failure)
+
+    def test_load_test_spec_parses_expect_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            spec_file = Path(tmpdir) / "fail_test.yaml"
+            spec_file.write_text(
+                "name: should-fail\n"
+                "source_path: .\n"
+                "expect:\n"
+                "  failure: true\n",
+                encoding="utf-8",
+            )
+            spec = load_test_spec(spec_file)
+            self.assertTrue(spec.expect_failure)
+
+    def test_expect_failure_passes_when_action_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = self._scaffold(Path(tmpdir))
+            # Replace main.sh with one that always exits 1
+            main_sh = repo / "src" / "main.sh"
+            main_sh.write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
+            main_sh.chmod(0o755)
+            # Overwrite the only spec so it expects failure
+            spec_dir = repo / ".github" / "pipery"
+            (spec_dir / "basic_test.yaml").write_text(
+                "name: expect-fail\n"
+                "source_path: test-project\n"
+                "inputs:\n"
+                "  project_path: test-project\n"
+                "expect:\n"
+                "  failure: true\n",
+                encoding="utf-8",
+            )
+            result = self.run_cli("test", "--repo", str(repo))
+            self.assertIn("PASS: expect-fail", result.stdout)
+
+    def test_expect_failure_fails_when_action_succeeds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = self._scaffold(Path(tmpdir))
+            spec_dir = repo / ".github" / "pipery"
+            # Write a spec pointing at a valid source — action will succeed, but we expect failure
+            (spec_dir / "wrong_expect_test.yaml").write_text(
+                "name: wrong-expect\n"
+                "source_path: test-project\n"
+                "inputs:\n"
+                "  project_path: test-project\n"
+                "expect:\n"
+                "  failure: true\n",
+                encoding="utf-8",
+            )
+            result = self.run_cli_no_check("test", "--repo", str(repo))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("FAIL: wrong-expect", result.stdout)
 
     def test_spec_failure_reported_correctly(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

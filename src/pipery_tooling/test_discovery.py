@@ -22,6 +22,7 @@ class TestSpec:
         default_factory=lambda: ["success", "succeeded", "passed", "ok"]
     )
     required_fields: list[dict[str, str]] = field(default_factory=list)
+    expect_failure: bool = False
 
 
 def discover_test_specs(repo_dir: Path) -> list[TestSpec]:
@@ -50,4 +51,5 @@ def load_test_spec(path: Path) -> TestSpec:
             {str(k): str(v) for k, v in f.items()}
             for f in expect.get("required_fields", [])
         ],
+        expect_failure=bool(expect.get("failure", False)),
     )

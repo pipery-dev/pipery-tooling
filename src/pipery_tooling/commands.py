@@ -143,7 +143,8 @@ def _run_spec_tests(repo_dir: Path, config: ActionConfig, specs: list[TestSpec])
     passed = 0
     failed = 0
     for spec in specs:
-        print(f"\n--- {spec.name} ---")
+        label = f"{spec.name} [expects failure]" if spec.expect_failure else spec.name
+        print(f"\n--- {label} ---")
         if spec.description:
             print(f"    {spec.description}")
         exit_code, errors = _run_one_spec(repo_dir, config, spec)
@@ -179,6 +180,13 @@ def _run_one_spec(repo_dir: Path, config: ActionConfig, spec: TestSpec) -> tuple
         env[_input_env_name(name)] = value
     print(f"Running action against: {source_dir}")
     result = subprocess.run(command, cwd=repo_dir, env=env, check=False, text=True)
+
+    if spec.expect_failure:
+        if result.returncode != 0:
+            print(f"Action failed as expected (exit {result.returncode})")
+            return 0, []
+        return 1, ["Expected action to fail but it succeeded"]
+
     if result.returncode != 0:
         return result.returncode, []
     errors = _validate_jsonl_log(
