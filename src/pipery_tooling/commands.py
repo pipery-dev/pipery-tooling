@@ -421,6 +421,11 @@ def create_release_branch(repo_dir: Path, config: ActionConfig, push: bool = Fal
         ["git", "remote", "get-url", "origin"], cwd=repo_dir, text=True
     ).strip()
 
+    # If GITHUB_TOKEN is available, inject it into the remote URL for authentication
+    github_token = os.environ.get("GITHUB_TOKEN")
+    if github_token and remote_url.startswith("https://github.com/"):
+        remote_url = remote_url.replace("https://github.com/", f"https://x-access-token:{github_token}@github.com/")
+
     with tempfile.TemporaryDirectory(prefix="pipery-release-") as tmpdir:
         release_dir = Path(tmpdir) / "release"
         release_dir.mkdir()

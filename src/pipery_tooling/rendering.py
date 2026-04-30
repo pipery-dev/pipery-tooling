@@ -22,6 +22,7 @@ def render_config(config: ActionConfig) -> str:
         f"default_branch = {toml_string(config.default_branch)}",
         f"version = {toml_string(config.version)}",
         f"repository_visibility = {toml_string(config.repository_visibility)}",
+        f"icon = {toml_string(config.icon)}",
         f"test_command = {toml_string(config.test_command)}",
         f"test_project_path = {toml_string(config.test_project_path)}",
         f"test_project_input = {toml_string(config.test_project_input)}",

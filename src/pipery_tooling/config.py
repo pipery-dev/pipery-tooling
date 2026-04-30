@@ -21,6 +21,7 @@ class ActionConfig:
     default_branch: str = "main"
     version: str = "0.1.0"
     repository_visibility: str = "public"
+    icon: str = ""
     inputs: list[dict[str, Any]] = field(default_factory=list)
     outputs: list[dict[str, Any]] = field(default_factory=list)
     test_command: str = ""
@@ -58,6 +59,7 @@ class ActionConfig:
             action_name=str(data["action_name"]),
             title=str(data["title"]),
             description=str(data["description"]),
+            icon=str(data.get("icon", "")),
             marketplace_category=str(data.get("marketplace_category", "continuous-integration")),
             author=str(data.get("author", data["owner"])),
             action_type=str(data.get("action_type", "composite")),
