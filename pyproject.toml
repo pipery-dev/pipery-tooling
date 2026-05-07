@@ -12,7 +12,7 @@ license = { text = "Proprietary" }
 authors = [
   { name = "Pipery" }
 ]
-dependencies = ["pyyaml>=6"]
+dependencies = ["pyyaml>=6", "requests>=2.28.0"]
 
 [project.scripts]
 pipery-actions = "pipery_tooling.cli:main"

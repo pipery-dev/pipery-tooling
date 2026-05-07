@@ -7,8 +7,11 @@ from .commands import (
     docs_command,
     release_command,
     scaffold_command,
+    tag_command,
     test_command,
     version_command,
+    sync_command,
+    create_tags_command,
 )
 
 
@@ -92,7 +95,119 @@ def build_parser() -> argparse.ArgumentParser:
         help="Build a slim releases/vMAJOR branch with only runtime files and tag it there.",
     )
     release.add_argument("--push", action="store_true", help="Commit, tag, and push everything to origin.")
+    release.add_argument(
+        "--platform",
+        choices=["github", "gitlab", "bitbucket", "all"],
+        default="all",
+        help="Create platform-specific release branches (default: all).",
+    )
+    release.add_argument(
+        "--create-release-branches",
+        action="store_true",
+        help="Create platform-specific release branches (release/PLATFORM-vX.Y.Z).",
+    )
+    release.add_argument(
+        "--inline-scripts",
+        action="store_true",
+        help="Inline scripts into GitLab and Bitbucket pipeline files for platform branches.",
+    )
     release.set_defaults(func=release_command)
+
+    tag = subparsers.add_parser("tag", help="Manage semantic version tags.")
+    tag.add_argument("--repo", required=True, help="Repository directory.")
+    tag_subparsers = tag.add_subparsers(dest="tag_action", required=True)
+
+    create_version = tag_subparsers.add_parser(
+        "create-version",
+        help="Create all tags for a version release.",
+    )
+    create_version.add_argument("--version", required=True, help="Version string (e.g., 1.2.3).")
+    create_version.add_argument("--commit", required=True, help="Commit hash to tag.")
+    create_version.add_argument("--platform", help="Platform suffix (e.g., gitlab).")
+    create_version.add_argument("--push", action="store_true", help="Push tags to origin.")
+    create_version.set_defaults(func=tag_command)
+
+    update_rolling = tag_subparsers.add_parser(
+        "update-rolling",
+        help="Update rolling tags (major/minor/latest) if version is newer.",
+    )
+    update_rolling.add_argument("--version", required=True, help="Version string (e.g., 1.2.3).")
+    update_rolling.add_argument("--commit", required=True, help="Commit hash the version is at.")
+    update_rolling.add_argument("--platform", help="Platform suffix (e.g., gitlab).")
+    update_rolling.add_argument("--push", action="store_true", help="Push updates to origin.")
+    update_rolling.set_defaults(func=tag_command)
+
+    reconcile = tag_subparsers.add_parser(
+        "reconcile",
+        help="Reconcile all tags for a platform.",
+    )
+    reconcile.add_argument("--platform", help="Platform suffix (e.g., gitlab). All platforms if not specified.")
+    reconcile.add_argument("--push", action="store_true", help="Push updates to origin.")
+    reconcile.set_defaults(func=tag_command)
+
+    list_tags = tag_subparsers.add_parser(
+        "list",
+        help="List all tags grouped by version.",
+    )
+    list_tags.add_argument("--platform", help="Filter by platform (e.g., gitlab).")
+    list_tags.set_defaults(func=tag_command)
+
+    validate = tag_subparsers.add_parser(
+        "validate",
+        help="Validate tags.",
+    )
+    validate.add_argument("--tag", help="Specific tag to validate. All if not specified.")
+    validate.add_argument("--platform", help="Filter by platform.")
+    validate.set_defaults(func=tag_command)
+
+    cleanup_tags = tag_subparsers.add_parser(
+        "cleanup",
+        help="Remove orphaned or invalid tags.",
+    )
+    cleanup_tags.add_argument("--remove-orphaned", action="store_true", help="Remove orphaned tags.")
+    cleanup_tags.add_argument("--remove-duplicates", action="store_true", help="Remove duplicate version tags.")
+    cleanup_tags.add_argument("--platform", help="Platform filter.")
+    cleanup_tags.add_argument("--push", action="store_true", help="Push deletions to origin.")
+    cleanup_tags.set_defaults(func=tag_command)
+
+    # Sync command
+    sync = subparsers.add_parser("sync", help="Sync repositories to GitLab and/or Bitbucket.")
+    sync.add_argument(
+        "--platform",
+        choices=["gitlab", "bitbucket", "all"],
+        default="all",
+        help="Target platform(s). Default: all",
+    )
+    sync.add_argument(
+        "--repos",
+        help="Comma-separated list of repos to sync (owner/repo format). If not specified, syncs all default Pipery repos.",
+    )
+    sync.add_argument("--gitlab-token", help="GitLab authentication token. Defaults to GITLAB_TOKEN env var.")
+    sync.add_argument("--bitbucket-token", help="Bitbucket authentication token. Defaults to BITBUCKET_TOKEN env var.")
+    sync.add_argument("--bitbucket-workspace", help="Bitbucket workspace. Defaults to BITBUCKET_WORKSPACE env var.")
+    sync.add_argument("--report", help="Save sync report to file.")
+    sync.add_argument("-v", "--verbose", action="store_true", help="Verbose logging.")
+    sync.set_defaults(func=sync_command)
+
+    # Create tags command
+    create_tags = subparsers.add_parser("create-tags", help="Create tags on GitLab and/or Bitbucket.")
+    create_tags.add_argument(
+        "--platform",
+        choices=["gitlab", "bitbucket", "all"],
+        default="all",
+        help="Target platform(s). Default: all",
+    )
+    create_tags.add_argument(
+        "--repos",
+        help="Comma-separated list of repos to create tags in. If not specified, uses all default Pipery repos.",
+    )
+    create_tags.add_argument("--gitlab-token", help="GitLab authentication token. Defaults to GITLAB_TOKEN env var.")
+    create_tags.add_argument("--bitbucket-token", help="Bitbucket authentication token. Defaults to BITBUCKET_TOKEN env var.")
+    create_tags.add_argument("--bitbucket-workspace", help="Bitbucket workspace. Defaults to BITBUCKET_WORKSPACE env var.")
+    create_tags.add_argument("--report", help="Save tag creation report to file.")
+    create_tags.add_argument("-v", "--verbose", action="store_true", help="Verbose logging.")
+    create_tags.set_defaults(func=create_tags_command)
+
     return parser
 
 

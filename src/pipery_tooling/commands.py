@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import re
 import shutil
@@ -27,6 +28,13 @@ from .rendering import (
     render_test_spec,
     render_usage_doc,
 )
+from .cross_platform_sync import RepositorySynchronizer
+from .rolling_tag_manager import TagManager as RollingTagManager, TagOperationError
+from .tag_manager import TagManager
+from .version_parser import VersionParser
+
+
+logger = logging.getLogger(__name__)
 
 
 SEMVER_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:[-+].+)?$")
@@ -370,6 +378,11 @@ def release_command(args: argparse.Namespace) -> int:
         _run_git(["git", "add", "."], repo_dir)
         _run_git(["git", "commit", "-m", f"Release v{config.version}"], repo_dir)
 
+    # Handle platform-specific releases (new feature)
+    create_platform_branches = getattr(args, "create_release_branches", False)
+    if create_platform_branches:
+        _create_platform_specific_releases(repo_dir, config, args)
+
     if use_release_branch:
         if do_push:
             _run_git(["git", "push", "origin", "HEAD"], repo_dir)
@@ -450,6 +463,70 @@ def create_release_branch(repo_dir: Path, config: ActionConfig, push: bool = Fal
             _run_git(cmd, release_dir)
 
     print(f"Released v{config.version} → {branch}")
+
+
+def _create_platform_specific_releases(repo_dir: Path, config: ActionConfig, args: argparse.Namespace) -> None:
+    """
+    Create platform-specific release branches with optional script inlining.
+
+    For each platform, creates:
+    - GitHub: release/github-v${version} (keeps scripts separate)
+    - GitLab: release/gitlab-v${version} (optionally inlines scripts)
+    - Bitbucket: release/bitbucket-v${version} (optionally inlines scripts)
+    """
+    from .release_branches import generate_release_branches
+    from .version_tagger import create_platform_tags
+
+    platforms = args.platform if args.platform != "all" else ["github", "gitlab", "bitbucket"]
+    if isinstance(platforms, str):
+        platforms = [platforms]
+
+    try:
+        print(f"\nCreating platform-specific release branches for v{config.version}...")
+
+        # Generate platform-specific branches
+        branch_map = generate_release_branches(
+            repo_dir,
+            config.version,
+            platforms=platforms,
+            dry_run=False,
+        )
+
+        for platform, branch_name in branch_map.items():
+            print(f"  ✓ {platform}: {branch_name}")
+
+        # Create platform-specific tags
+        print(f"\nCreating platform-specific tags for v{config.version}...")
+        tags_map = create_platform_tags(
+            repo_dir,
+            config.version,
+            platforms=platforms,
+            dry_run=False,
+        )
+
+        for platform, tags in tags_map.items():
+            print(f"  {platform}:")
+            for tag in tags:
+                print(f"    - {tag}")
+
+        if args.push:
+            print("\nPushing platform-specific branches and tags...")
+            for branch in branch_map.values():
+                try:
+                    _run_git(["git", "push", "origin", branch], repo_dir)
+                    print(f"  ✓ Pushed branch: {branch}")
+                except RuntimeError as e:
+                    print(f"  ✗ Failed to push branch {branch}: {e}")
+
+            from .version_tagger import push_platform_tags
+            try:
+                push_platform_tags(repo_dir, config.version, platforms=platforms)
+                print(f"  ✓ Pushed all platform-specific tags")
+            except RuntimeError as e:
+                print(f"  ✗ Failed to push tags: {e}")
+
+    except (RuntimeError, ValueError) as e:
+        print(f"ERROR creating platform-specific releases: {e}")
 
 
 def _copy_runtime_files(repo_dir: Path, dest: Path, config: ActionConfig) -> None:
@@ -671,3 +748,390 @@ def _read_if_exists(path: Path) -> str:
     if not path.exists():
         return ""
     return path.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# sync
+# ---------------------------------------------------------------------------
+
+def sync_command(args: argparse.Namespace) -> int:
+    """Sync repositories to GitLab and/or Bitbucket."""
+    # Configure logging
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    logging.basicConfig(level=log_level, format="%(levelname)s: %(message)s")
+
+    synchronizer = RepositorySynchronizer()
+
+    # Determine repos to sync
+    repos = None
+    if args.repos:
+        repos = args.repos.split(",")
+
+    # Determine platforms
+    platforms = None
+    if args.platform != "all":
+        platforms = [args.platform]
+
+    # Get tokens from env or args
+    gitlab_token = args.gitlab_token or os.getenv("GITLAB_TOKEN")
+    bitbucket_token = args.bitbucket_token or os.getenv("BITBUCKET_TOKEN")
+    bitbucket_workspace = args.bitbucket_workspace or os.getenv("BITBUCKET_WORKSPACE")
+
+    if not gitlab_token and (not platforms or "gitlab" in platforms):
+        print("ERROR: GitLab token not provided. Set GITLAB_TOKEN env var or use --gitlab-token")
+        return 1
+
+    if not bitbucket_token and (not platforms or "bitbucket" in platforms):
+        print("ERROR: Bitbucket token not provided. Set BITBUCKET_TOKEN env var or use --bitbucket-token")
+        return 1
+
+    # Run sync
+    print(f"Syncing repositories to {args.platform}...")
+    report = synchronizer.sync_all_platforms(
+        repos=repos,
+        platforms=platforms,
+        gitlab_token=gitlab_token,
+        bitbucket_token=bitbucket_token,
+        bitbucket_workspace=bitbucket_workspace,
+    )
+
+    # Print results
+    print("\n" + "=" * 60)
+    print(f"Sync Report ({report.platform})")
+    print("=" * 60)
+    print(f"Timestamp: {report.timestamp}")
+    print(f"Total:     {report.to_dict()['summary']['total']}")
+    print(f"Success:   {report.to_dict()['summary']['successful']}")
+    print(f"Failed:    {report.to_dict()['summary']['failed']}")
+
+    if report.successful:
+        print("\nSuccessful syncs:")
+        for repo in report.successful:
+            print(f"  ✓ {repo}")
+
+    if report.failed:
+        print("\nFailed syncs:")
+        for repo, error in report.failed.items():
+            print(f"  ✗ {repo}: {error}")
+
+    # Save report to file if requested
+    if args.report:
+        report_path = Path(args.report)
+        report_path.write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
+        print(f"\nReport saved to: {report_path}")
+
+    return 0 if not report.failed else 1
+
+
+def create_tags_command(args: argparse.Namespace) -> int:
+    """Create missing tags on GitLab and Bitbucket based on release branches."""
+    # Configure logging
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    logging.basicConfig(level=log_level, format="%(levelname)s: %(message)s")
+
+    # Get tokens
+    gitlab_token = args.gitlab_token or os.getenv("GITLAB_TOKEN")
+    bitbucket_token = args.bitbucket_token or os.getenv("BITBUCKET_TOKEN")
+    bitbucket_workspace = args.bitbucket_workspace or os.getenv("BITBUCKET_WORKSPACE")
+
+    tag_manager = TagManager(
+        gitlab_token=gitlab_token,
+        bitbucket_token=bitbucket_token,
+        bitbucket_workspace=bitbucket_workspace,
+    )
+
+    results = {
+        "gitlab": {},
+        "bitbucket": {},
+    }
+
+    # Process GitLab repos
+    if args.platform in ("gitlab", "all"):
+        if not gitlab_token:
+            print("ERROR: GitLab token not provided for --platform gitlab")
+            return 1
+
+        print("Creating tags on GitLab...")
+        if args.repos:
+            for repo in args.repos.split(","):
+                print(f"  Processing: {repo}")
+                results["gitlab"][repo] = tag_manager.create_missing_tags_gitlab(repo)
+        else:
+            # Process all default repos
+            for repo in RepositorySynchronizer._get_default_repos():
+                repo_name = repo.split("/")[-1]
+                print(f"  Processing: {repo_name}")
+                results["gitlab"][repo_name] = tag_manager.create_missing_tags_gitlab(repo_name)
+
+    # Process Bitbucket repos
+    if args.platform in ("bitbucket", "all"):
+        if not bitbucket_token:
+            print("ERROR: Bitbucket token not provided for --platform bitbucket")
+            return 1
+
+        print("Creating tags on Bitbucket...")
+        if args.repos:
+            for repo in args.repos.split(","):
+                print(f"  Processing: {repo}")
+                results["bitbucket"][repo] = tag_manager.create_missing_tags_bitbucket(repo)
+        else:
+            # Process all default repos
+            for repo in RepositorySynchronizer._get_default_repos():
+                repo_name = repo.split("/")[-1]
+                print(f"  Processing: {repo_name}")
+                results["bitbucket"][repo_name] = tag_manager.create_missing_tags_bitbucket(repo_name)
+
+    # Print results
+    print("\n" + "=" * 60)
+    print("Tag Creation Results")
+    print("=" * 60)
+
+    for platform, repos_results in results.items():
+        if not repos_results:
+            continue
+        print(f"\n{platform.upper()}:")
+        for repo, result in repos_results.items():
+            if result.get("errors"):
+                print(f"  ✗ {repo}")
+                for error in result["errors"]:
+                    print(f"      {error}")
+            else:
+                created_count = len(result.get("created", []))
+                updated_count = len(result.get("updated", []))
+                print(f"  ✓ {repo} ({created_count} created, {updated_count} updated)")
+
+    # Save results to file if requested
+    if args.report:
+        report_path = Path(args.report)
+        report_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
+        print(f"\nResults saved to: {report_path}")
+
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# tag management (semantic versioning and rolling tags)
+# ---------------------------------------------------------------------------
+
+def tag_command(args: argparse.Namespace) -> int:
+    """Manage semantic version tags with rolling tag updates."""
+    repo_dir = Path(args.repo).resolve()
+
+    if not repo_dir.is_dir():
+        print(f"ERROR: Repository directory not found: {repo_dir}")
+        return 1
+
+    manager = RollingTagManager(repo_dir)
+    tag_action = getattr(args, "tag_action", None)
+
+    try:
+        if tag_action == "create-version":
+            return _tag_create_version(manager, args)
+        elif tag_action == "update-rolling":
+            return _tag_update_rolling(manager, args)
+        elif tag_action == "reconcile":
+            return _tag_reconcile(manager, args)
+        elif tag_action == "list":
+            return _tag_list(manager, args)
+        elif tag_action == "validate":
+            return _tag_validate(manager, args)
+        elif tag_action == "cleanup":
+            return _tag_cleanup(manager, args)
+        else:
+            print(f"ERROR: Unknown tag action: {tag_action}")
+            return 1
+    except TagOperationError as exc:
+        print(f"ERROR: {exc}")
+        return 1
+    except Exception as exc:
+        print(f"ERROR: {exc}")
+        logger.exception("Unexpected error during tag operation")
+        return 1
+
+
+def _tag_create_version(manager: RollingTagManager, args: argparse.Namespace) -> int:
+    """Create all tags for a version release."""
+    version = args.version.lstrip("v")
+    commit = args.commit
+    platform = getattr(args, "platform", None)
+    push = getattr(args, "push", False)
+
+    parsed = VersionParser.parse_version_string(version)
+    if not parsed:
+        print(f"ERROR: Invalid version format: {version}")
+        return 1
+
+    tags = manager.create_version_tags(version, commit, platform, push)
+
+    print(f"Created tags for v{version}{f'-{platform}' if platform else ''}:")
+    for kind, tag in tags.items():
+        print(f"  {kind:8} {tag}")
+
+    if push:
+        print(f"Pushed {len(tags)} tags to origin")
+
+    return 0
+
+
+def _tag_update_rolling(manager: RollingTagManager, args: argparse.Namespace) -> int:
+    """Update rolling tags if version is newer."""
+    version = args.version.lstrip("v")
+    commit = args.commit
+    platform = getattr(args, "platform", None)
+    push = getattr(args, "push", False)
+
+    parsed = VersionParser.parse_version_string(version)
+    if not parsed:
+        print(f"ERROR: Invalid version format: {version}")
+        return 1
+
+    updated = manager.update_rolling_tags(version, commit, platform, push)
+
+    if updated:
+        print(f"Updated rolling tags for v{version}{f'-{platform}' if platform else ''}:")
+        for kind, tag in updated.items():
+            print(f"  {kind:8} {tag}")
+        if push:
+            print(f"Pushed {len(updated)} tag updates to origin")
+    else:
+        print(f"No rolling tag updates needed for v{version}")
+
+    return 0
+
+
+def _tag_reconcile(manager: RollingTagManager, args: argparse.Namespace) -> int:
+    """Reconcile all tags for a platform."""
+    platform = getattr(args, "platform", None)
+    push = getattr(args, "push", False)
+
+    print(f"Reconciling tags{f' for {platform}' if platform else ' for all platforms'}...")
+    result = manager.reconcile_all_tags(platform, push)
+
+    print("\nReconciliation Summary:")
+    print(f"  Created: {len(result['created'])}")
+    print(f"  Updated: {len(result['updated'])}")
+    print(f"  Errors:  {len(result['errors'])}")
+
+    if result["created"]:
+        print("\nCreated tags:")
+        for tag in result["created"]:
+            print(f"  + {tag}")
+
+    if result["updated"]:
+        print("\nUpdated tags:")
+        for tag in result["updated"]:
+            print(f"  ~ {tag}")
+
+    if result["errors"]:
+        print("\nErrors:")
+        for error in result["errors"]:
+            print(f"  ! {error}")
+        return 1
+
+    return 0
+
+
+def _tag_list(manager: RollingTagManager, args: argparse.Namespace) -> int:
+    """List all tags grouped by version."""
+    platform = getattr(args, "platform", None)
+    versions = manager.get_versions_by_platform(platform)
+
+    if not versions:
+        print("No tags found")
+        return 0
+
+    # Group by major.minor series
+    by_series = {}
+    for tag, parsed in sorted(versions.items()):
+        if parsed.is_latest:
+            series = "latest"
+        else:
+            series = f"v{parsed.major}"
+            if parsed.minor is not None:
+                series += f".{parsed.minor}"
+        if series not in by_series:
+            by_series[series] = []
+        by_series[series].append((tag, parsed))
+
+    # Sort and display
+    for series in sorted(by_series.keys(), key=lambda s: (s != "latest", s)):
+        tags = by_series[series]
+        print(f"\n{series}:")
+        for tag, parsed in sorted(tags):
+            commit = manager.get_tag_commit(tag)
+            commit_short = commit[:8] if commit else "???"
+            print(f"  {tag:30} {commit_short}")
+
+    return 0
+
+
+def _tag_validate(manager: RollingTagManager, args: argparse.Namespace) -> int:
+    """Validate tags."""
+    specific_tag = getattr(args, "tag", None)
+    platform = getattr(args, "platform", None)
+    has_errors = False
+
+    if specific_tag:
+        errors = manager.validate_tag(specific_tag)
+        if errors:
+            print(f"✗ {specific_tag}:")
+            for error in errors:
+                print(f"    {error}")
+            has_errors = True
+        else:
+            print(f"✓ {specific_tag} is valid")
+    else:
+        versions = manager.get_versions_by_platform(platform)
+        if not versions:
+            print("No tags found to validate")
+            return 0
+
+        for tag in sorted(versions.keys()):
+            errors = manager.validate_tag(tag)
+            if errors:
+                print(f"✗ {tag}:")
+                for error in errors:
+                    print(f"    {error}")
+                has_errors = True
+            else:
+                print(f"✓ {tag}")
+
+    return 1 if has_errors else 0
+
+
+def _tag_cleanup(manager: RollingTagManager, args: argparse.Namespace) -> int:
+    """Remove orphaned or invalid tags."""
+    remove_orphaned = getattr(args, "remove_orphaned", False)
+    remove_duplicates = getattr(args, "remove_duplicates", False)
+    platform = getattr(args, "platform", None)
+    push = getattr(args, "push", False)
+
+    removed = []
+
+    if remove_orphaned:
+        orphaned = manager.find_orphaned_tags()
+        for tag, parsed in orphaned:
+            print(f"Removing orphaned tag: {tag}")
+            manager.delete_tag(tag)
+            if push:
+                manager.delete_remote_tag(tag)
+            removed.append(tag)
+
+    if remove_duplicates:
+        duplicates = manager.find_duplicate_versions()
+        for version, tags in duplicates.items():
+            # Keep the first, remove others
+            print(f"Version {version} has duplicates: {tags}")
+            for tag in tags[1:]:
+                print(f"  Removing duplicate: {tag}")
+                manager.delete_tag(tag)
+                if push:
+                    manager.delete_remote_tag(tag)
+                removed.append(tag)
+
+    if removed:
+        print(f"\nRemoved {len(removed)} tags")
+    else:
+        print("No tags to clean up")
+
+    return 0

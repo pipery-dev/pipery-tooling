@@ -1,0 +1,587 @@
+"""Cross-platform repository synchronization for GitLab and Bitbucket."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import shutil
+import subprocess
+import tempfile
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+from urllib.parse import urlparse, urlunparse
+
+import requests
+
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class SyncReport:
+    """Report of sync operation results."""
+    successful: list[str]
+    failed: dict[str, str]
+    timestamp: str
+    platform: str
+
+    def to_dict(self) -> dict:
+        return {
+            "platform": self.platform,
+            "timestamp": self.timestamp,
+            "successful": self.successful,
+            "failed": self.failed,
+            "summary": {
+                "total": len(self.successful) + len(self.failed),
+                "successful": len(self.successful),
+                "failed": len(self.failed),
+            },
+        }
+
+
+class GitLabAPI:
+    """GitLab API client for repository management."""
+
+    def __init__(self, base_url: str = "https://gitlab.com", token: str | None = None):
+        self.base_url = base_url.rstrip("/")
+        self.token = token or os.getenv("GITLAB_TOKEN")
+        if not self.token:
+            raise ValueError(
+                "GitLab token not provided. Set GITLAB_TOKEN environment variable or pass token parameter."
+            )
+        self.headers = {
+            "PRIVATE-TOKEN": self.token,
+            "Content-Type": "application/json",
+        }
+
+    def get_project(self, project_id: str) -> dict | None:
+        """Get project details. Returns None if project doesn't exist."""
+        url = f"{self.base_url}/api/v4/projects/{self._encode_project_id(project_id)}"
+        response = requests.get(url, headers=self.headers, timeout=10)
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return response.json()
+
+    def create_project(
+        self,
+        name: str,
+        description: str = "",
+        visibility: str = "public",
+        group_id: int | None = None,
+    ) -> dict:
+        """Create a new GitLab project."""
+        url = f"{self.base_url}/api/v4/projects"
+        data = {
+            "name": name,
+            "description": description,
+            "visibility": visibility,
+        }
+        if group_id:
+            data["namespace_id"] = group_id
+
+        response = requests.post(url, headers=self.headers, json=data, timeout=10)
+        response.raise_for_status()
+        return response.json()
+
+    def get_project_url(self, project_id: str) -> str:
+        """Get HTTPS clone URL for a project."""
+        project = self.get_project(project_id)
+        if not project:
+            raise ValueError(f"Project {project_id} not found on GitLab")
+        return project["http_url_to_repo"]
+
+    def push_branch(self, project_id: str, branch_name: str, local_repo_path: str) -> None:
+        """Push a branch to GitLab project."""
+        project = self.get_project(project_id)
+        if not project:
+            raise ValueError(f"Project {project_id} not found on GitLab")
+
+        clone_url = project["http_url_to_repo"]
+        # Replace https:// with token-based URL
+        parsed = urlparse(clone_url)
+        authenticated_url = f"https://oauth2:{self.token}@{parsed.netloc}{parsed.path}"
+
+        subprocess.run(
+            ["git", "push", authenticated_url, f"{branch_name}:refs/heads/{branch_name}"],
+            cwd=local_repo_path,
+            check=True,
+            capture_output=True,
+        )
+
+    def create_tag(self, project_id: str, tag_name: str, ref: str, message: str = "") -> dict:
+        """Create a tag in GitLab project."""
+        url = f"{self.base_url}/api/v4/projects/{self._encode_project_id(project_id)}/repository/tags"
+        data = {
+            "tag_name": tag_name,
+            "ref": ref,
+        }
+        if message:
+            data["message"] = message
+
+        response = requests.post(url, headers=self.headers, json=data, timeout=10)
+        response.raise_for_status()
+        return response.json()
+
+    def get_tag(self, project_id: str, tag_name: str) -> dict | None:
+        """Get tag details. Returns None if tag doesn't exist."""
+        url = f"{self.base_url}/api/v4/projects/{self._encode_project_id(project_id)}/repository/tags/{tag_name}"
+        response = requests.get(url, headers=self.headers, timeout=10)
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return response.json()
+
+    def list_branches(self, project_id: str) -> list[dict]:
+        """List all branches in a project."""
+        url = f"{self.base_url}/api/v4/projects/{self._encode_project_id(project_id)}/repository/branches"
+        response = requests.get(url, headers=self.headers, timeout=10)
+        response.raise_for_status()
+        return response.json()
+
+    @staticmethod
+    def _encode_project_id(project_id: str) -> str:
+        """Encode project ID for URL (URL-encoded format for namespace/project)."""
+        return project_id.replace("/", "%2F")
+
+
+class BitbucketAPI:
+    """Bitbucket API client for repository management."""
+
+    def __init__(self, workspace: str, token: str | None = None):
+        self.base_url = "https://api.bitbucket.org/2.0"
+        self.workspace = workspace
+        self.token = token or os.getenv("BITBUCKET_TOKEN")
+        if not self.token:
+            raise ValueError(
+                "Bitbucket token not provided. Set BITBUCKET_TOKEN environment variable or pass token parameter."
+            )
+        self.auth = ("x-token-auth", self.token)
+
+    def get_repository(self, repo_slug: str) -> dict | None:
+        """Get repository details. Returns None if repo doesn't exist."""
+        url = f"{self.base_url}/repositories/{self.workspace}/{repo_slug}"
+        response = requests.get(url, auth=self.auth, timeout=10)
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return response.json()
+
+    def create_repository(
+        self,
+        repo_slug: str,
+        description: str = "",
+        is_private: bool = False,
+    ) -> dict:
+        """Create a new Bitbucket repository."""
+        url = f"{self.base_url}/repositories/{self.workspace}/{repo_slug}"
+        data = {
+            "scm": "git",
+            "description": description,
+            "is_private": is_private,
+        }
+        response = requests.post(url, auth=self.auth, json=data, timeout=10)
+        response.raise_for_status()
+        return response.json()
+
+    def get_repository_url(self, repo_slug: str) -> str:
+        """Get HTTPS clone URL for a repository."""
+        repo = self.get_repository(repo_slug)
+        if not repo:
+            raise ValueError(f"Repository {repo_slug} not found on Bitbucket")
+        # Get HTTPS link from links
+        for link in repo.get("links", {}).get("clone", []):
+            if link.get("name") == "https":
+                return link["href"]
+        raise ValueError(f"No HTTPS clone URL found for {repo_slug}")
+
+    def push_branch(self, repo_slug: str, branch_name: str, local_repo_path: str) -> None:
+        """Push a branch to Bitbucket repository."""
+        repo = self.get_repository(repo_slug)
+        if not repo:
+            raise ValueError(f"Repository {repo_slug} not found on Bitbucket")
+
+        clone_url = self.get_repository_url(repo_slug)
+        # Replace https:// with token-based URL
+        parsed = urlparse(clone_url)
+        authenticated_url = f"https://x-token-auth:{self.token}@{parsed.netloc}{parsed.path}"
+
+        subprocess.run(
+            ["git", "push", authenticated_url, f"{branch_name}:refs/heads/{branch_name}"],
+            cwd=local_repo_path,
+            check=True,
+            capture_output=True,
+        )
+
+    def create_tag(self, repo_slug: str, tag_name: str, commit_hash: str) -> dict:
+        """Create a tag in Bitbucket repository."""
+        url = f"{self.base_url}/repositories/{self.workspace}/{repo_slug}/refs/tags/{tag_name}"
+        data = {
+            "object": {
+                "type": "commit",
+                "hash": commit_hash,
+            }
+        }
+        response = requests.post(url, auth=self.auth, json=data, timeout=10)
+        response.raise_for_status()
+        return response.json()
+
+    def get_tag(self, repo_slug: str, tag_name: str) -> dict | None:
+        """Get tag details. Returns None if tag doesn't exist."""
+        url = f"{self.base_url}/repositories/{self.workspace}/{repo_slug}/refs/tags/{tag_name}"
+        response = requests.get(url, auth=self.auth, timeout=10)
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return response.json()
+
+    def list_branches(self, repo_slug: str) -> list[dict]:
+        """List all branches in a repository."""
+        url = f"{self.base_url}/repositories/{self.workspace}/{repo_slug}/refs/branches"
+        response = requests.get(url, auth=self.auth, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        return data.get("values", [])
+
+
+class RepositorySynchronizer:
+    """Synchronize repositories across platforms."""
+
+    # Files and directories to exclude from sync
+    EXCLUDE_PATTERNS = {
+        ".git",
+        ".github",
+        ".gitignore",
+        ".gitlab-ci.yml",
+        "bitbucket-pipelines.yml",
+        ".bitbucket",
+        "action.yml",
+        ".releases",
+        ".tags",
+    }
+
+    def __init__(
+        self,
+        github_token: str | None = None,
+    ):
+        self.github_token = github_token or os.getenv("GITHUB_TOKEN")
+
+    def sync_to_platform(
+        self,
+        github_repo: str,
+        platform: str,
+        auth_token: str | None = None,
+        platform_config: dict | None = None,
+    ) -> dict:
+        """
+        Sync a GitHub repository to GitLab or Bitbucket.
+
+        Args:
+            github_repo: GitHub repository in format 'owner/repo'
+            platform: 'gitlab' or 'bitbucket'
+            auth_token: Authentication token for target platform
+            platform_config: Additional config (e.g., {'group_id': 123} for GitLab)
+
+        Returns:
+            dict with sync status and details
+        """
+        if platform not in ("gitlab", "bitbucket"):
+            raise ValueError(f"Unknown platform: {platform}")
+
+        platform_config = platform_config or {}
+
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                tmpdir_path = Path(tmpdir)
+
+                # Clone GitHub repo
+                logger.info(f"Cloning GitHub repo: {github_repo}")
+                github_clone_url = f"https://github.com/{github_repo}.git"
+                local_repo_path = tmpdir_path / "repo"
+
+                self._clone_repo(github_clone_url, str(local_repo_path))
+
+                # Extract repo name
+                repo_name = github_repo.split("/")[-1]
+
+                if platform == "gitlab":
+                    return self._sync_to_gitlab(
+                        repo_name, github_repo, str(local_repo_path), auth_token, platform_config
+                    )
+                else:
+                    return self._sync_to_bitbucket(
+                        repo_name, github_repo, str(local_repo_path), auth_token, platform_config
+                    )
+        except Exception as e:
+            logger.error(f"Error syncing {github_repo} to {platform}: {e}")
+            return {
+                "status": "failed",
+                "error": str(e),
+                "repo": github_repo,
+                "platform": platform,
+            }
+
+    def _sync_to_gitlab(
+        self,
+        repo_name: str,
+        github_repo: str,
+        local_repo_path: str,
+        auth_token: str | None,
+        platform_config: dict,
+    ) -> dict:
+        """Sync repository to GitLab."""
+        gitlab = GitLabAPI(token=auth_token)
+        group_id = platform_config.get("group_id")
+
+        # Check if project exists
+        logger.info(f"Checking GitLab for project: {repo_name}")
+        existing = gitlab.get_project(repo_name)
+
+        if not existing:
+            logger.info(f"Creating GitLab project: {repo_name}")
+            try:
+                gitlab.create_project(
+                    name=repo_name,
+                    description=f"Synced from GitHub: {github_repo}",
+                    visibility="public",
+                    group_id=group_id,
+                )
+            except Exception as e:
+                logger.error(f"Failed to create GitLab project: {e}")
+                return {
+                    "status": "failed",
+                    "error": f"Failed to create project: {e}",
+                    "repo": github_repo,
+                    "platform": "gitlab",
+                }
+
+        # Sync code files
+        logger.info(f"Syncing files to GitLab: {repo_name}")
+        self._sync_files_to_gitlab(repo_name, local_repo_path, gitlab)
+
+        return {
+            "status": "success",
+            "repo": github_repo,
+            "platform": "gitlab",
+            "target_repo": repo_name,
+        }
+
+    def _sync_to_bitbucket(
+        self,
+        repo_name: str,
+        github_repo: str,
+        local_repo_path: str,
+        auth_token: str | None,
+        platform_config: dict,
+    ) -> dict:
+        """Sync repository to Bitbucket."""
+        workspace = platform_config.get("workspace") or os.getenv("BITBUCKET_WORKSPACE")
+        if not workspace:
+            return {
+                "status": "failed",
+                "error": "Bitbucket workspace not provided",
+                "repo": github_repo,
+                "platform": "bitbucket",
+            }
+
+        bitbucket = BitbucketAPI(workspace=workspace, token=auth_token)
+
+        # Check if repo exists
+        logger.info(f"Checking Bitbucket for repo: {repo_name}")
+        existing = bitbucket.get_repository(repo_name)
+
+        if not existing:
+            logger.info(f"Creating Bitbucket repository: {repo_name}")
+            try:
+                bitbucket.create_repository(
+                    repo_slug=repo_name,
+                    description=f"Synced from GitHub: {github_repo}",
+                    is_private=False,
+                )
+            except Exception as e:
+                logger.error(f"Failed to create Bitbucket repo: {e}")
+                return {
+                    "status": "failed",
+                    "error": f"Failed to create repository: {e}",
+                    "repo": github_repo,
+                    "platform": "bitbucket",
+                }
+
+        # Sync code files
+        logger.info(f"Syncing files to Bitbucket: {repo_name}")
+        self._sync_files_to_bitbucket(repo_name, local_repo_path, bitbucket)
+
+        return {
+            "status": "success",
+            "repo": github_repo,
+            "platform": "bitbucket",
+            "target_repo": repo_name,
+        }
+
+    def _sync_files_to_gitlab(self, project_name: str, local_repo_path: str, gitlab: GitLabAPI) -> None:
+        """Push synced files to GitLab."""
+        # Prepare sync branch
+        sync_branch = "sync/github-main"
+        subprocess.run(
+            ["git", "checkout", "-b", sync_branch],
+            cwd=local_repo_path,
+            check=True,
+            capture_output=True,
+        )
+
+        # Remove excluded files/dirs
+        self._remove_excluded_files(Path(local_repo_path))
+
+        # Commit and push
+        subprocess.run(
+            ["git", "add", "-A"],
+            cwd=local_repo_path,
+            check=True,
+            capture_output=True,
+        )
+
+        result = subprocess.run(
+            ["git", "commit", "-m", "Sync from GitHub"],
+            cwd=local_repo_path,
+            capture_output=True,
+            text=True,
+        )
+
+        if result.returncode == 0:
+            # Push to GitLab
+            logger.info(f"Pushing to GitLab: {project_name}")
+            gitlab.push_branch(project_name, sync_branch, local_repo_path)
+
+    def _sync_files_to_bitbucket(
+        self, repo_slug: str, local_repo_path: str, bitbucket: BitbucketAPI
+    ) -> None:
+        """Push synced files to Bitbucket."""
+        # Prepare sync branch
+        sync_branch = "sync/github-main"
+        subprocess.run(
+            ["git", "checkout", "-b", sync_branch],
+            cwd=local_repo_path,
+            check=True,
+            capture_output=True,
+        )
+
+        # Remove excluded files/dirs
+        self._remove_excluded_files(Path(local_repo_path))
+
+        # Commit and push
+        subprocess.run(
+            ["git", "add", "-A"],
+            cwd=local_repo_path,
+            check=True,
+            capture_output=True,
+        )
+
+        result = subprocess.run(
+            ["git", "commit", "-m", "Sync from GitHub"],
+            cwd=local_repo_path,
+            capture_output=True,
+            text=True,
+        )
+
+        if result.returncode == 0:
+            # Push to Bitbucket
+            logger.info(f"Pushing to Bitbucket: {repo_slug}")
+            bitbucket.push_branch(repo_slug, sync_branch, local_repo_path)
+
+    def _remove_excluded_files(self, repo_path: Path) -> None:
+        """Remove excluded files and directories from repository."""
+        for item in self.EXCLUDE_PATTERNS:
+            item_path = repo_path / item
+            if item_path.exists():
+                if item_path.is_dir():
+                    shutil.rmtree(item_path)
+                else:
+                    item_path.unlink()
+                logger.debug(f"Removed: {item}")
+
+    def _clone_repo(self, clone_url: str, target_path: str) -> None:
+        """Clone a repository."""
+        subprocess.run(
+            ["git", "clone", "--quiet", clone_url, target_path],
+            check=True,
+            capture_output=True,
+        )
+
+    def sync_all_platforms(
+        self,
+        repos: list[str] | None = None,
+        platforms: list[str] | None = None,
+        gitlab_token: str | None = None,
+        bitbucket_token: str | None = None,
+        bitbucket_workspace: str | None = None,
+    ) -> SyncReport:
+        """
+        Sync all or specified repos to all or specified platforms.
+
+        Args:
+            repos: List of repos in format 'owner/repo'. If None, syncs default pipery repos.
+            platforms: List of platforms ('gitlab', 'bitbucket'). If None, syncs to all.
+            gitlab_token: GitLab authentication token
+            bitbucket_token: Bitbucket authentication token
+            bitbucket_workspace: Bitbucket workspace name
+
+        Returns:
+            SyncReport with results
+        """
+        if repos is None:
+            repos = self._get_default_repos()
+
+        if platforms is None:
+            platforms = ["gitlab", "bitbucket"]
+
+        successful = []
+        failed = {}
+
+        for repo in repos:
+            for platform in platforms:
+                try:
+                    logger.info(f"Syncing {repo} to {platform}")
+                    platform_config = {}
+                    if platform == "bitbucket" and bitbucket_workspace:
+                        platform_config["workspace"] = bitbucket_workspace
+
+                    token = gitlab_token if platform == "gitlab" else bitbucket_token
+                    result = self.sync_to_platform(repo, platform, auth_token=token, platform_config=platform_config)
+
+                    if result.get("status") == "success":
+                        successful.append(f"{repo}→{platform}")
+                    else:
+                        failed[f"{repo}→{platform}"] = result.get("error", "Unknown error")
+                except Exception as e:
+                    failed[f"{repo}→{platform}"] = str(e)
+
+        return SyncReport(
+            successful=successful,
+            failed=failed,
+            timestamp=datetime.now().isoformat(),
+            platform="all",
+        )
+
+    @staticmethod
+    def _get_default_repos() -> list[str]:
+        """Get default list of Pipery repos to sync."""
+        return [
+            "pipery-dev/pipery-cpp-ci",
+            "pipery-dev/pipery-golang-ci",
+            "pipery-dev/pipery-java-ci",
+            "pipery-dev/pipery-npm-ci",
+            "pipery-dev/pipery-python-ci",
+            "pipery-dev/pipery-rust-ci",
+            "pipery-dev/pipery-docker-ci",
+            "pipery-dev/pipery-terraform-ci",
+            "pipery-dev/pipery-ansible-cd",
+            "pipery-dev/pipery-argocd-cd",
+            "pipery-dev/pipery-cloudrun-cd",
+            "pipery-dev/pipery-docker-cd",
+            "pipery-dev/pipery-helm-cd",
+            "pipery-dev/pipery-terraform-cd",
+        ]
