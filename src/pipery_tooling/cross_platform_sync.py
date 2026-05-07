@@ -60,9 +60,11 @@ class GitLabAPI:
         self.base_url = base_url.rstrip("/")
         self.token = token or os.getenv("GITLAB_TOKEN")
         if not self.token:
+            logger.error("GitLab token not provided. Set GITLAB_TOKEN environment variable or pass token parameter.")
             raise ValueError(
                 "GitLab token not provided. Set GITLAB_TOKEN environment variable or pass token parameter."
             )
+        logger.info("GitLab API initialized with token from environment or parameters")
         self.headers = {
             "PRIVATE-TOKEN": self.token,
             "Content-Type": "application/json",
@@ -181,9 +183,11 @@ class BitbucketAPI:
         self.workspace = workspace
         self.token = token or os.getenv("BITBUCKET_TOKEN")
         if not self.token:
+            logger.error("Bitbucket token not provided. Set BITBUCKET_TOKEN environment variable or pass token parameter.")
             raise ValueError(
                 "Bitbucket token not provided. Set BITBUCKET_TOKEN environment variable or pass token parameter."
             )
+        logger.info(f"Bitbucket API initialized for workspace '{workspace}' with token from environment or parameters")
         self.auth = ("x-token-auth", self.token)
 
     def get_repository(self, repo_slug: str) -> dict | None:

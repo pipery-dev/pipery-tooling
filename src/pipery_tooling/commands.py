@@ -777,16 +777,41 @@ def sync_command(args: argparse.Namespace) -> int:
     bitbucket_token = args.bitbucket_token or os.getenv("BITBUCKET_TOKEN")
     bitbucket_workspace = args.bitbucket_workspace or os.getenv("BITBUCKET_WORKSPACE")
 
+    # Check token availability
+    print("\n" + "=" * 60)
+    print("Token Availability Check")
+    print("=" * 60)
+
+    if gitlab_token:
+        print(f"✓ GITLAB_TOKEN detected (length: {len(gitlab_token)} chars)")
+        logger.debug("GitLab token is available")
+    else:
+        print("⚠ GITLAB_TOKEN not available")
+        logger.warning("GITLAB_TOKEN not found in environment or arguments")
+
+    if bitbucket_token:
+        print(f"✓ BITBUCKET_TOKEN detected (length: {len(bitbucket_token)} chars)")
+        logger.debug("Bitbucket token is available")
+    else:
+        print("⚠ BITBUCKET_TOKEN not available")
+        logger.warning("BITBUCKET_TOKEN not found in environment or arguments")
+
+    # Validate required tokens
     if not gitlab_token and (not platforms or "gitlab" in platforms):
-        print("ERROR: GitLab token not provided. Set GITLAB_TOKEN env var or use --gitlab-token")
+        print("\nERROR: GitLab token not provided for requested platform.")
+        print("Set GITLAB_TOKEN environment variable or use --gitlab-token flag.")
         return 1
 
     if not bitbucket_token and (not platforms or "bitbucket" in platforms):
-        print("ERROR: Bitbucket token not provided. Set BITBUCKET_TOKEN env var or use --bitbucket-token")
+        print("\nERROR: Bitbucket token not provided for requested platform.")
+        print("Set BITBUCKET_TOKEN environment variable or use --bitbucket-token flag.")
         return 1
 
+    print("\n" + "=" * 60)
+    print(f"Starting sync to {args.platform}...")
+    print("=" * 60 + "\n")
+
     # Run sync
-    print(f"Syncing repositories to {args.platform}...")
     report = synchronizer.sync_all_platforms(
         repos=repos,
         platforms=platforms,
