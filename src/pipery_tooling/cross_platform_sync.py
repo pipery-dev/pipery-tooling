@@ -17,6 +17,16 @@ from urllib.parse import urlparse, urlunparse
 
 import requests
 
+GIT_CREDENTIALS_HELPER = """
+store_credentials() {
+    export GIT_USERNAME="$1"
+    export GIT_PASSWORD="$2"
+}
+read_credentials() {
+    echo "$GIT_USERNAME:$GIT_PASSWORD"
+}
+"""
+
 
 logger = logging.getLogger(__name__)
 
@@ -96,21 +106,35 @@ class GitLabAPI:
         return project["http_url_to_repo"]
 
     def push_branch(self, project_id: str, branch_name: str, local_repo_path: str) -> None:
-        """Push a branch to GitLab project."""
+        """Push a branch to GitLab project using secure credential passing."""
         project = self.get_project(project_id)
         if not project:
             raise ValueError(f"Project {project_id} not found on GitLab")
 
         clone_url = project["http_url_to_repo"]
-        # Replace https:// with token-based URL
-        parsed = urlparse(clone_url)
-        authenticated_url = f"https://oauth2:{self.token}@{parsed.netloc}{parsed.path}"
 
+        # Configure git to use credential helper for secure token passing
+        # Avoid embedding token in command line arguments (visible in process listings)
         subprocess.run(
-            ["git", "push", authenticated_url, f"{branch_name}:refs/heads/{branch_name}"],
+            ["git", "config", "credential.helper", "store"],
             cwd=local_repo_path,
             check=True,
             capture_output=True,
+        )
+
+        # Prepare credentials in the format git expects
+        credentials = f"https://oauth2:{self.token}@{urlparse(clone_url).netloc}\n"
+
+        # Push using the clean URL, credentials will be retrieved from credential helper
+        env = os.environ.copy()
+        subprocess.run(
+            ["git", "push", clone_url, f"{branch_name}:refs/heads/{branch_name}"],
+            cwd=local_repo_path,
+            input=credentials,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
         )
 
     def create_tag(self, project_id: str, tag_name: str, ref: str, message: str = "") -> dict:
@@ -200,21 +224,35 @@ class BitbucketAPI:
         raise ValueError(f"No HTTPS clone URL found for {repo_slug}")
 
     def push_branch(self, repo_slug: str, branch_name: str, local_repo_path: str) -> None:
-        """Push a branch to Bitbucket repository."""
+        """Push a branch to Bitbucket repository using secure credential passing."""
         repo = self.get_repository(repo_slug)
         if not repo:
             raise ValueError(f"Repository {repo_slug} not found on Bitbucket")
 
         clone_url = self.get_repository_url(repo_slug)
-        # Replace https:// with token-based URL
-        parsed = urlparse(clone_url)
-        authenticated_url = f"https://x-token-auth:{self.token}@{parsed.netloc}{parsed.path}"
 
+        # Configure git to use credential helper for secure token passing
+        # Avoid embedding token in command line arguments (visible in process listings)
         subprocess.run(
-            ["git", "push", authenticated_url, f"{branch_name}:refs/heads/{branch_name}"],
+            ["git", "config", "credential.helper", "store"],
             cwd=local_repo_path,
             check=True,
             capture_output=True,
+        )
+
+        # Prepare credentials in Bitbucket format
+        credentials = f"https://x-token-auth:{self.token}@{urlparse(clone_url).netloc}\n"
+
+        # Push using the clean URL, credentials will be retrieved from credential helper
+        env = os.environ.copy()
+        subprocess.run(
+            ["git", "push", clone_url, f"{branch_name}:refs/heads/{branch_name}"],
+            cwd=local_repo_path,
+            input=credentials,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
         )
 
     def create_tag(self, repo_slug: str, tag_name: str, commit_hash: str) -> dict:
@@ -251,17 +289,23 @@ class BitbucketAPI:
 class RepositorySynchronizer:
     """Synchronize repositories across platforms."""
 
-    # Files and directories to exclude from sync
+    # Base files and directories to exclude from sync
+    # Platform-specific configs (.gitlab-ci.yml, bitbucket-pipelines.yml) are handled separately
+    # by _should_exclude_file() based on target platform
     EXCLUDE_PATTERNS = {
         ".git",
         ".github",
         ".gitignore",
-        ".gitlab-ci.yml",
-        "bitbucket-pipelines.yml",
         ".bitbucket",
         "action.yml",
         ".releases",
         ".tags",
+    }
+
+    # Platform-specific CI/CD files
+    PLATFORM_CONFIG_FILES = {
+        ".gitlab-ci.yml",
+        "bitbucket-pipelines.yml",
     }
 
     def __init__(
@@ -269,6 +313,33 @@ class RepositorySynchronizer:
         github_token: str | None = None,
     ):
         self.github_token = github_token or os.getenv("GITHUB_TOKEN")
+
+    def _should_exclude_file(self, filename: str, target_platform: str) -> bool:
+        """
+        Determine if a file should be excluded based on target platform.
+
+        Platform-specific CI/CD files are preserved for their target platform:
+        - .gitlab-ci.yml is kept when syncing to GitLab, excluded for Bitbucket
+        - bitbucket-pipelines.yml is kept when syncing to Bitbucket, excluded for GitLab
+
+        Args:
+            filename: Name of the file to check
+            target_platform: Target platform ('gitlab' or 'bitbucket')
+
+        Returns:
+            True if file should be excluded, False otherwise
+        """
+        # Check base exclude patterns
+        if filename in self.EXCLUDE_PATTERNS:
+            return True
+
+        # Platform-specific config files: keep for target, exclude for others
+        if filename == ".gitlab-ci.yml":
+            return target_platform != "gitlab"
+        if filename == "bitbucket-pipelines.yml":
+            return target_platform != "bitbucket"
+
+        return False
 
     def sync_to_platform(
         self,
@@ -423,7 +494,7 @@ class RepositorySynchronizer:
         }
 
     def _sync_files_to_gitlab(self, project_name: str, local_repo_path: str, gitlab: GitLabAPI) -> None:
-        """Push synced files to GitLab."""
+        """Push synced files to GitLab with platform-aware filtering."""
         # Prepare sync branch
         sync_branch = "sync/github-main"
         subprocess.run(
@@ -433,8 +504,8 @@ class RepositorySynchronizer:
             capture_output=True,
         )
 
-        # Remove excluded files/dirs
-        self._remove_excluded_files(Path(local_repo_path))
+        # Remove excluded files/dirs (platform-aware for GitLab)
+        self._remove_excluded_files(Path(local_repo_path), target_platform="gitlab")
 
         # Commit and push
         subprocess.run(
@@ -459,7 +530,7 @@ class RepositorySynchronizer:
     def _sync_files_to_bitbucket(
         self, repo_slug: str, local_repo_path: str, bitbucket: BitbucketAPI
     ) -> None:
-        """Push synced files to Bitbucket."""
+        """Push synced files to Bitbucket with platform-aware filtering."""
         # Prepare sync branch
         sync_branch = "sync/github-main"
         subprocess.run(
@@ -469,8 +540,8 @@ class RepositorySynchronizer:
             capture_output=True,
         )
 
-        # Remove excluded files/dirs
-        self._remove_excluded_files(Path(local_repo_path))
+        # Remove excluded files/dirs (platform-aware for Bitbucket)
+        self._remove_excluded_files(Path(local_repo_path), target_platform="bitbucket")
 
         # Commit and push
         subprocess.run(
@@ -492,16 +563,61 @@ class RepositorySynchronizer:
             logger.info(f"Pushing to Bitbucket: {repo_slug}")
             bitbucket.push_branch(repo_slug, sync_branch, local_repo_path)
 
-    def _remove_excluded_files(self, repo_path: Path) -> None:
-        """Remove excluded files and directories from repository."""
+    def _backup_file(self, filepath: Path, backup_suffix: str = ".backup") -> Path:
+        """
+        Create a backup copy of a file before it would be overwritten.
+
+        Args:
+            filepath: Path to the file to backup
+            backup_suffix: Suffix to append to backup filename
+
+        Returns:
+            Path to the backup file
+        """
+        if not filepath.exists():
+            return None
+
+        backup_path = filepath.parent / (filepath.name + backup_suffix)
+        if filepath.is_dir():
+            if backup_path.exists():
+                shutil.rmtree(backup_path)
+            shutil.copytree(filepath, backup_path)
+        else:
+            shutil.copy2(filepath, backup_path)
+
+        logger.info(f"Created backup: {backup_path}")
+        return backup_path
+
+    def _remove_excluded_files(self, repo_path: Path, target_platform: str | None = None) -> None:
+        """
+        Remove excluded files and directories from repository.
+
+        Args:
+            repo_path: Path to the repository
+            target_platform: Target platform ('gitlab' or 'bitbucket') for platform-aware filtering
+        """
+        # Remove base excluded patterns
         for item in self.EXCLUDE_PATTERNS:
             item_path = repo_path / item
             if item_path.exists():
+                self._backup_file(item_path)
                 if item_path.is_dir():
                     shutil.rmtree(item_path)
                 else:
                     item_path.unlink()
                 logger.debug(f"Removed: {item}")
+
+        # Handle platform-specific config files
+        if target_platform:
+            for config_file in self.PLATFORM_CONFIG_FILES:
+                if self._should_exclude_file(config_file, target_platform):
+                    config_path = repo_path / config_file
+                    if config_path.exists():
+                        self._backup_file(config_path)
+                        config_path.unlink()
+                        logger.debug(f"Removed platform config: {config_file} (not for {target_platform})")
+                else:
+                    logger.debug(f"Preserving platform config: {config_file} (for {target_platform})")
 
     def _clone_repo(self, clone_url: str, target_path: str) -> None:
         """Clone a repository."""
