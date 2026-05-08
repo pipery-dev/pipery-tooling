@@ -296,8 +296,8 @@ class RepositorySynchronizer:
     # Base files and directories to exclude from sync
     # Platform-specific configs (.gitlab-ci.yml, bitbucket-pipelines.yml) are handled separately
     # by _should_exclude_file() based on target platform
+    # Note: .git is intentionally NOT excluded as it's needed for git operations (commit/push)
     EXCLUDE_PATTERNS = {
-        ".git",
         ".github",
         ".gitignore",
         ".bitbucket",
