@@ -1,0 +1,130 @@
+name: Cross-Platform Release
+
+on:
+  workflow_call:
+    inputs:
+      repo_name:
+        description: 'Repository name (bare slug like pipery-npm-ci)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+  BITBUCKET_TOKEN: ${{ secrets.BITBUCKET_TOKEN }}
+  BITBUCKET_WORKSPACE: ${{ secrets.BITBUCKET_WORKSPACE }}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install pipery-tooling
+        run: |
+          pip install --upgrade pip
+          pip install git+https://github.com/pipery-dev/pipery-tooling.git
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Check token availability
+        run: |
+          echo "Checking token availability..."
+
+          if [ -z "$GITLAB_TOKEN" ]; then
+            echo "WARNING: GITLAB_TOKEN not available"
+          else
+            echo "✓ GITLAB_TOKEN is available (length: ${#GITLAB_TOKEN})"
+          fi
+
+          if [ -z "$BITBUCKET_TOKEN" ]; then
+            echo "WARNING: BITBUCKET_TOKEN not available"
+          else
+            echo "✓ BITBUCKET_TOKEN is available (length: ${#BITBUCKET_TOKEN})"
+          fi
+
+      - name: Create GitHub release
+        id: github_release
+        run: |
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
+
+          # Extract changelog for this version
+          VERSION=${TAG_NAME#v}
+
+          gh release create "$TAG_NAME" \
+            --title "Release $TAG_NAME" \
+            --draft=false \
+            --prerelease=false \
+            --generate-notes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sync to GitLab
+        if: env.GITLAB_TOKEN != ''
+        run: |
+          echo "Syncing ${{ inputs.repo_name }} to GitLab..."
+          pipery-actions sync \
+            --repos pipery-dev/${{ inputs.repo_name }} \
+            --platform gitlab \
+            --verbose
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sync to Bitbucket
+        if: env.BITBUCKET_TOKEN != ''
+        run: |
+          echo "Syncing ${{ inputs.repo_name }} to Bitbucket..."
+          pipery-actions sync \
+            --repos pipery-dev/${{ inputs.repo_name }} \
+            --platform bitbucket \
+            --verbose
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create tags on GitLab
+        if: env.GITLAB_TOKEN != ''
+        continue-on-error: true
+        run: |
+          echo "Creating tags on GitLab..."
+          pipery-actions create-tags \
+            --platform gitlab \
+            --repos ${{ inputs.repo_name }} \
+            --verbose
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create tags on Bitbucket
+        if: env.BITBUCKET_TOKEN != ''
+        continue-on-error: true
+        run: |
+          echo "Creating tags on Bitbucket..."
+          pipery-actions create-tags \
+            --platform bitbucket \
+            --repos ${{ inputs.repo_name }} \
+            --verbose
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Release summary
+        if: always()
+        run: |
+          echo "Release Summary"
+          echo "=============="
+          echo "Repository: ${{ inputs.repo_name }}"
+          echo "GitHub Release: ${{ steps.github_release.outputs.tag_name }}"
+          echo "GitLab Sync: ${{ env.GITLAB_TOKEN != '' && 'Enabled' || 'Skipped (no token)' }}"
+          echo "Bitbucket Sync: ${{ env.BITBUCKET_TOKEN != '' && 'Enabled' || 'Skipped (no token)' }}"
