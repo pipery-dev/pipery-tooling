@@ -88,8 +88,12 @@ class GitLabAPI:
     ) -> dict:
         """Create a new GitLab project."""
         url = f"{self.base_url}/api/v4/projects"
+        # GitLab API requires both name and path; path must be URL-safe
+        # Convert name to path by replacing hyphens and special chars with underscores
+        path = name.replace("-", "_").lower()
         data = {
             "name": name,
+            "path": path,
             "description": description,
             "visibility": visibility,
         }
@@ -456,9 +460,10 @@ class RepositorySynchronizer:
         """Sync repository to Bitbucket."""
         workspace = platform_config.get("workspace") or os.getenv("BITBUCKET_WORKSPACE")
         if not workspace:
+            logger.warning(f"Skipping Bitbucket sync for {github_repo}: BITBUCKET_WORKSPACE not provided. Set BITBUCKET_WORKSPACE environment variable or provide workspace in platform_config.")
             return {
-                "status": "failed",
-                "error": "Bitbucket workspace not provided",
+                "status": "skipped",
+                "error": "Bitbucket workspace not provided. Set BITBUCKET_WORKSPACE environment variable.",
                 "repo": github_repo,
                 "platform": "bitbucket",
             }
