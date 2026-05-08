@@ -75,6 +75,7 @@ jobs:
 
       - name: Sync to GitLab
         if: env.GITLAB_TOKEN != ''
+        continue-on-error: true
         run: |
           echo "Syncing ${{ inputs.repo_name }} to GitLab..."
           pipery-actions sync \
@@ -86,6 +87,7 @@ jobs:
 
       - name: Sync to Bitbucket
         if: env.BITBUCKET_TOKEN != ''
+        continue-on-error: true
         run: |
           echo "Syncing ${{ inputs.repo_name }} to Bitbucket..."
           pipery-actions sync \
