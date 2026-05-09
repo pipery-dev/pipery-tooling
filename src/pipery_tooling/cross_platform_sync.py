@@ -150,7 +150,7 @@ class GitLabAPI:
         return clone_url
 
     def push_branch(self, project_id: str, branch_name: str, local_repo_path: str, project: dict | None = None) -> None:
-        """Push a branch to GitLab project using secure credential passing.
+        """Push a branch to GitLab project.
 
         Args:
             project_id: Project ID or name
@@ -165,29 +165,29 @@ class GitLabAPI:
 
         clone_url = self.get_project_url(project_id, project=project)
 
-        # Configure git to use credential helper for secure token passing
-        # Avoid embedding token in command line arguments (visible in process listings)
-        subprocess.run(
-            ["git", "config", "credential.helper", "store"],
-            cwd=local_repo_path,
-            check=True,
-            capture_output=True,
-        )
+        # Embed token in URL for authentication in GitHub Actions environment
+        parsed = urlparse(clone_url)
+        auth_url = urlunparse((
+            parsed.scheme,
+            f"oauth2:{self.token}@{parsed.netloc}",
+            parsed.path,
+            parsed.params,
+            parsed.query,
+            parsed.fragment,
+        ))
 
-        # Prepare credentials in the format git expects
-        credentials = f"https://oauth2:{self.token}@{urlparse(clone_url).netloc}\n"
-
-        # Push using the clean URL, credentials will be retrieved from credential helper
         env = os.environ.copy()
-        subprocess.run(
-            ["git", "push", clone_url, f"{branch_name}:refs/heads/{branch_name}"],
+        result = subprocess.run(
+            ["git", "push", auth_url, f"{branch_name}:refs/heads/{branch_name}"],
             cwd=local_repo_path,
-            input=credentials,
-            check=True,
             capture_output=True,
             text=True,
             env=env,
         )
+        if result.returncode != 0:
+            logger.error(f"Failed to push to GitLab: {result.stderr}")
+            raise RuntimeError(f"Git push failed: {result.stderr}")
+        logger.info(f"Successfully pushed {branch_name} to GitLab project {project_id}")
 
     def create_tag(self, project_id: str, tag_name: str, ref: str, message: str = "") -> dict:
         """Create a tag in GitLab project."""
@@ -278,36 +278,36 @@ class BitbucketAPI:
         raise ValueError(f"No HTTPS clone URL found for {repo_slug}")
 
     def push_branch(self, repo_slug: str, branch_name: str, local_repo_path: str) -> None:
-        """Push a branch to Bitbucket repository using secure credential passing."""
+        """Push a branch to Bitbucket repository."""
         repo = self.get_repository(repo_slug)
         if not repo:
             raise ValueError(f"Repository {repo_slug} not found on Bitbucket")
 
         clone_url = self.get_repository_url(repo_slug)
 
-        # Configure git to use credential helper for secure token passing
-        # Avoid embedding token in command line arguments (visible in process listings)
-        subprocess.run(
-            ["git", "config", "credential.helper", "store"],
-            cwd=local_repo_path,
-            check=True,
-            capture_output=True,
-        )
+        # Embed token in URL for authentication in GitHub Actions environment
+        parsed = urlparse(clone_url)
+        auth_url = urlunparse((
+            parsed.scheme,
+            f"x-token-auth:{self.token}@{parsed.netloc}",
+            parsed.path,
+            parsed.params,
+            parsed.query,
+            parsed.fragment,
+        ))
 
-        # Prepare credentials in Bitbucket format
-        credentials = f"https://x-token-auth:{self.token}@{urlparse(clone_url).netloc}\n"
-
-        # Push using the clean URL, credentials will be retrieved from credential helper
         env = os.environ.copy()
-        subprocess.run(
-            ["git", "push", clone_url, f"{branch_name}:refs/heads/{branch_name}"],
+        result = subprocess.run(
+            ["git", "push", auth_url, f"{branch_name}:refs/heads/{branch_name}"],
             cwd=local_repo_path,
-            input=credentials,
-            check=True,
             capture_output=True,
             text=True,
             env=env,
         )
+        if result.returncode != 0:
+            logger.error(f"Failed to push to Bitbucket: {result.stderr}")
+            raise RuntimeError(f"Git push failed: {result.stderr}")
+        logger.info(f"Successfully pushed {branch_name} to Bitbucket repository {repo_slug}")
 
     def create_tag(self, repo_slug: str, tag_name: str, commit_hash: str) -> dict:
         """Create a tag in Bitbucket repository."""
