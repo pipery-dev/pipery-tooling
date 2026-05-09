@@ -558,6 +558,20 @@ class RepositorySynchronizer:
             gitlab: GitLab API client
             project: Optional project dict to avoid redundant lookups
         """
+        # Configure git author for commits in this repository
+        subprocess.run(
+            ["git", "config", "user.name", "github-actions[bot]"],
+            cwd=local_repo_path,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"],
+            cwd=local_repo_path,
+            check=True,
+            capture_output=True,
+        )
+
         # Prepare sync branch
         sync_branch = "sync/github-main"
         subprocess.run(
@@ -602,6 +616,20 @@ class RepositorySynchronizer:
         self, repo_slug: str, local_repo_path: str, bitbucket: BitbucketAPI
     ) -> None:
         """Push synced files to Bitbucket with platform-aware filtering."""
+        # Configure git author for commits in this repository
+        subprocess.run(
+            ["git", "config", "user.name", "github-actions[bot]"],
+            cwd=local_repo_path,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"],
+            cwd=local_repo_path,
+            check=True,
+            capture_output=True,
+        )
+
         # Prepare sync branch
         sync_branch = "sync/github-main"
         subprocess.run(
