@@ -94,7 +94,9 @@ class GitLabAPI:
             # Return the first matching project
             if projects:
                 logger.debug(f"Found {len(projects)} project(s) matching '{search_term}'")
-                return projects[0]
+                first_match = projects[0]
+                logger.debug(f"First match: id={first_match.get('id')}, name={first_match.get('name')}, path={first_match.get('path')}, path_with_namespace={first_match.get('path_with_namespace')}, http_url_to_repo={first_match.get('http_url_to_repo')}")
+                return first_match
             logger.debug(f"No projects found matching '{search_term}'")
         return None
 
