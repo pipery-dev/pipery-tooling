@@ -585,10 +585,18 @@ class RepositorySynchronizer:
             text=True,
         )
 
-        if result.returncode == 0:
-            # Push to GitLab
+        logger.debug(f"Git commit result: returncode={result.returncode}, stdout={result.stdout[:200] if result.stdout else ''}, stderr={result.stderr[:200] if result.stderr else ''}")
+
+        if result.returncode == 0 or "nothing to commit" in result.stdout.lower():
+            # Push to GitLab (even if there's nothing new to commit, we still want to create the branch)
             logger.info(f"Pushing to GitLab: {project_name}")
-            gitlab.push_branch(project_name, sync_branch, local_repo_path, project=project)
+            try:
+                gitlab.push_branch(project_name, sync_branch, local_repo_path, project=project)
+                logger.info(f"Successfully pushed sync branch to GitLab")
+            except Exception as e:
+                logger.error(f"Failed to push to GitLab: {e}")
+        else:
+            logger.error(f"Git commit failed: {result.stderr}")
 
     def _sync_files_to_bitbucket(
         self, repo_slug: str, local_repo_path: str, bitbucket: BitbucketAPI
@@ -621,10 +629,18 @@ class RepositorySynchronizer:
             text=True,
         )
 
-        if result.returncode == 0:
-            # Push to Bitbucket
+        logger.debug(f"Git commit result: returncode={result.returncode}, stdout={result.stdout[:200] if result.stdout else ''}, stderr={result.stderr[:200] if result.stderr else ''}")
+
+        if result.returncode == 0 or "nothing to commit" in result.stdout.lower():
+            # Push to Bitbucket (even if there's nothing new to commit, we still want to create the branch)
             logger.info(f"Pushing to Bitbucket: {repo_slug}")
-            bitbucket.push_branch(repo_slug, sync_branch, local_repo_path)
+            try:
+                bitbucket.push_branch(repo_slug, sync_branch, local_repo_path)
+                logger.info(f"Successfully pushed sync branch to Bitbucket")
+            except Exception as e:
+                logger.error(f"Failed to push to Bitbucket: {e}")
+        else:
+            logger.error(f"Git commit failed: {result.stderr}")
 
     def _backup_file(self, filepath: Path, backup_suffix: str = ".backup") -> Path:
         """
