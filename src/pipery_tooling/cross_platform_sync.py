@@ -419,9 +419,13 @@ class RepositorySynchronizer:
         gitlab = GitLabAPI(token=auth_token)
         group_id = platform_config.get("group_id")
 
-        # Check if project exists
-        logger.info(f"Checking GitLab for project: {repo_name}")
-        existing = gitlab.get_project(repo_name)
+        # Check if project exists (use sanitized path for lookup)
+        # Sanitize the name to match what was/will be created
+        sanitized_path = repo_name.replace("-", "_").lower()
+        logger.info(f"Checking GitLab for project: {repo_name} (path: {sanitized_path})")
+
+        # Try both the original name and sanitized path for lookup
+        existing = gitlab.get_project(repo_name) or gitlab.get_project(sanitized_path)
 
         if not existing:
             logger.info(f"Creating GitLab project: {repo_name}")
@@ -462,7 +466,7 @@ class RepositorySynchronizer:
     ) -> dict:
         """Sync repository to Bitbucket."""
         workspace = platform_config.get("workspace") or os.getenv("BITBUCKET_WORKSPACE")
-        if not workspace:
+        if not workspace or workspace.strip() == "":
             logger.warning(f"Skipping Bitbucket sync for {github_repo}: BITBUCKET_WORKSPACE not provided. Set BITBUCKET_WORKSPACE environment variable or provide workspace in platform_config.")
             return {
                 "status": "skipped",
