@@ -133,9 +133,17 @@ class GitLabAPI:
             raise ValueError(f"Project {project_id} not found on GitLab")
         return project["http_url_to_repo"]
 
-    def push_branch(self, project_id: str, branch_name: str, local_repo_path: str) -> None:
-        """Push a branch to GitLab project using secure credential passing."""
-        project = self.get_project(project_id)
+    def push_branch(self, project_id: str, branch_name: str, local_repo_path: str, project: dict | None = None) -> None:
+        """Push a branch to GitLab project using secure credential passing.
+
+        Args:
+            project_id: Project ID or name
+            branch_name: Name of the branch to push
+            local_repo_path: Path to local repository
+            project: Optional project dict (if already looked up) to avoid redundant API calls
+        """
+        if not project:
+            project = self.get_project(project_id)
         if not project:
             raise ValueError(f"Project {project_id} not found on GitLab")
 
@@ -447,9 +455,13 @@ class RepositorySynchronizer:
         existing = gitlab.get_project(repo_name)
         logger.info(f"Lookup by original name '{repo_name}': {'found' if existing else 'not found'}")
 
+        # Store the actual project ID for later API calls
+        gitlab.project_id = existing.get("id") if existing else None
+
         if not existing:
             existing = gitlab.get_project(sanitized_path)
             logger.info(f"Lookup by sanitized path '{sanitized_path}': {'found' if existing else 'not found'}")
+            gitlab.project_id = existing.get("id") if existing else None
 
         if not existing:
             logger.info(f"Creating GitLab project: {repo_name}")
@@ -460,6 +472,10 @@ class RepositorySynchronizer:
                     visibility="public",
                     group_id=group_id,
                 )
+                # Re-fetch the newly created project
+                existing = gitlab.get_project(repo_name) or gitlab.get_project(sanitized_path)
+                if existing:
+                    gitlab.project_id = existing.get("id")
             except Exception as e:
                 logger.error(f"Failed to create GitLab project: {e}")
                 return {
@@ -469,9 +485,9 @@ class RepositorySynchronizer:
                     "platform": "gitlab",
                 }
 
-        # Sync code files
+        # Sync code files (passing the existing project to avoid redundant lookups)
         logger.info(f"Syncing files to GitLab: {repo_name}")
-        self._sync_files_to_gitlab(repo_name, local_repo_path, gitlab)
+        self._sync_files_to_gitlab(repo_name, local_repo_path, gitlab, existing)
 
         return {
             "status": "success",
@@ -533,8 +549,15 @@ class RepositorySynchronizer:
             "target_repo": repo_name,
         }
 
-    def _sync_files_to_gitlab(self, project_name: str, local_repo_path: str, gitlab: GitLabAPI) -> None:
-        """Push synced files to GitLab with platform-aware filtering."""
+    def _sync_files_to_gitlab(self, project_name: str, local_repo_path: str, gitlab: GitLabAPI, project: dict | None = None) -> None:
+        """Push synced files to GitLab with platform-aware filtering.
+
+        Args:
+            project_name: Name of the project
+            local_repo_path: Path to local repository
+            gitlab: GitLab API client
+            project: Optional project dict to avoid redundant lookups
+        """
         # Prepare sync branch
         sync_branch = "sync/github-main"
         subprocess.run(
@@ -565,7 +588,7 @@ class RepositorySynchronizer:
         if result.returncode == 0:
             # Push to GitLab
             logger.info(f"Pushing to GitLab: {project_name}")
-            gitlab.push_branch(project_name, sync_branch, local_repo_path)
+            gitlab.push_branch(project_name, sync_branch, local_repo_path, project=project)
 
     def _sync_files_to_bitbucket(
         self, repo_slug: str, local_repo_path: str, bitbucket: BitbucketAPI
