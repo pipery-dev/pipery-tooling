@@ -77,11 +77,26 @@ class GitLabAPI:
         response = requests.get(url, headers=self.headers, timeout=10)
         logger.debug(f"GitLab lookup response: {response.status_code}")
         if response.status_code == 404:
-            logger.debug(f"Project '{project_id}' not found on GitLab")
-            return None
+            logger.debug(f"Project '{project_id}' not found by direct lookup, trying search...")
+            # Try searching across all projects
+            return self._search_project(project_id)
         response.raise_for_status()
         logger.debug(f"Found project '{project_id}' on GitLab")
         return response.json()
+
+    def _search_project(self, search_term: str) -> dict | None:
+        """Search for a project by name across all namespaces."""
+        url = f"{self.base_url}/api/v4/projects"
+        params = {"search": search_term, "simple": "true"}
+        response = requests.get(url, headers=self.headers, params=params, timeout=10)
+        if response.status_code == 200:
+            projects = response.json()
+            # Return the first matching project
+            if projects:
+                logger.debug(f"Found {len(projects)} project(s) matching '{search_term}'")
+                return projects[0]
+            logger.debug(f"No projects found matching '{search_term}'")
+        return None
 
     def create_project(
         self,
