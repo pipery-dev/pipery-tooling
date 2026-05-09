@@ -73,10 +73,14 @@ class GitLabAPI:
     def get_project(self, project_id: str) -> dict | None:
         """Get project details. Returns None if project doesn't exist."""
         url = f"{self.base_url}/api/v4/projects/{self._encode_project_id(project_id)}"
+        logger.debug(f"Looking up GitLab project at URL: {url}")
         response = requests.get(url, headers=self.headers, timeout=10)
+        logger.debug(f"GitLab lookup response: {response.status_code}")
         if response.status_code == 404:
+            logger.debug(f"Project '{project_id}' not found on GitLab")
             return None
         response.raise_for_status()
+        logger.debug(f"Found project '{project_id}' on GitLab")
         return response.json()
 
     def create_project(
@@ -425,7 +429,12 @@ class RepositorySynchronizer:
         logger.info(f"Checking GitLab for project: {repo_name} (path: {sanitized_path})")
 
         # Try both the original name and sanitized path for lookup
-        existing = gitlab.get_project(repo_name) or gitlab.get_project(sanitized_path)
+        existing = gitlab.get_project(repo_name)
+        logger.info(f"Lookup by original name '{repo_name}': {'found' if existing else 'not found'}")
+
+        if not existing:
+            existing = gitlab.get_project(sanitized_path)
+            logger.info(f"Lookup by sanitized path '{sanitized_path}': {'found' if existing else 'not found'}")
 
         if not existing:
             logger.info(f"Creating GitLab project: {repo_name}")
