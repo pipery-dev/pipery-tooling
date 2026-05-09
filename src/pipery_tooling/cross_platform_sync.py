@@ -126,12 +126,26 @@ class GitLabAPI:
         response.raise_for_status()
         return response.json()
 
-    def get_project_url(self, project_id: str) -> str:
-        """Get HTTPS clone URL for a project."""
-        project = self.get_project(project_id)
+    def get_project_url(self, project_id: str, project: dict | None = None) -> str:
+        """Get HTTPS clone URL for a project.
+
+        Args:
+            project_id: Project ID or name
+            project: Optional project dict (if already looked up)
+        """
+        if not project:
+            project = self.get_project(project_id)
         if not project:
             raise ValueError(f"Project {project_id} not found on GitLab")
-        return project["http_url_to_repo"]
+
+        # Return the proper HTTP URL from the project object
+        clone_url = project.get("http_url_to_repo")
+        if not clone_url:
+            # Fallback: construct URL from project path
+            path = project.get("path_with_namespace") or project.get("path")
+            clone_url = f"{self.base_url}/{path}.git"
+        logger.debug(f"Project URL for {project_id}: {clone_url}")
+        return clone_url
 
     def push_branch(self, project_id: str, branch_name: str, local_repo_path: str, project: dict | None = None) -> None:
         """Push a branch to GitLab project using secure credential passing.
@@ -147,7 +161,7 @@ class GitLabAPI:
         if not project:
             raise ValueError(f"Project {project_id} not found on GitLab")
 
-        clone_url = project["http_url_to_repo"]
+        clone_url = self.get_project_url(project_id, project=project)
 
         # Configure git to use credential helper for secure token passing
         # Avoid embedding token in command line arguments (visible in process listings)
