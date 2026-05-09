@@ -461,17 +461,15 @@ class RepositorySynchronizer:
         """Sync repository to GitLab."""
         gitlab = GitLabAPI(token=auth_token)
         group_id = platform_config.get("group_id")
-        namespace = platform_config.get("namespace", "")
 
         # Check if project exists (use sanitized path for lookup)
         # Sanitize the name to match what was/will be created
         sanitized_path = repo_name.replace("-", "_").lower()
-        lookup_path = f"{namespace}/{repo_name}" if namespace else repo_name
-        logger.info(f"Checking GitLab for project: {lookup_path} (path: {sanitized_path})")
+        logger.info(f"Checking GitLab for project: {repo_name} (path: {sanitized_path}, group_id: {group_id})")
 
-        # Try with full namespace path first, then original name and sanitized path
-        existing = gitlab.get_project(lookup_path)
-        logger.info(f"Lookup by full path '{lookup_path}': {'found' if existing else 'not found'}")
+        # Try both the original name and sanitized path for lookup
+        existing = gitlab.get_project(repo_name)
+        logger.info(f"Lookup by original name '{repo_name}': {'found' if existing else 'not found'}")
 
         # Store the actual project ID for later API calls
         gitlab.project_id = existing.get("id") if existing else None
@@ -788,8 +786,13 @@ class RepositorySynchronizer:
                     logger.info(f"Syncing {repo} to {platform}")
                     platform_config = {}
                     if platform == "gitlab":
-                        # Configure pipery-dev namespace
-                        platform_config["namespace"] = "pipery-dev"
+                        # Get pipery-dev group ID from environment
+                        gitlab_group_id = os.getenv("GITLAB_GROUP_ID")
+                        if gitlab_group_id:
+                            try:
+                                platform_config["group_id"] = int(gitlab_group_id)
+                            except ValueError:
+                                logger.warning(f"Invalid GITLAB_GROUP_ID: {gitlab_group_id}")
                     elif platform == "bitbucket" and bitbucket_workspace:
                         platform_config["workspace"] = bitbucket_workspace
 
