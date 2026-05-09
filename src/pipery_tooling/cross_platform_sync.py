@@ -100,7 +100,10 @@ class GitLabAPI:
         if group_id:
             data["namespace_id"] = group_id
 
+        logger.debug(f"Creating GitLab project with data: {data}")
         response = requests.post(url, headers=self.headers, json=data, timeout=10)
+        if response.status_code != 201:
+            logger.error(f"GitLab API error {response.status_code}: {response.text}")
         response.raise_for_status()
         return response.json()
 
