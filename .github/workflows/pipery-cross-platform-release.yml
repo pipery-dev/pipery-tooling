@@ -58,18 +58,21 @@ jobs:
 
       - name: Create GitHub release
         id: github_release
+        continue-on-error: true
         run: |
           TAG_NAME=${GITHUB_REF#refs/tags/}
           echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
 
-          # Extract changelog for this version
-          VERSION=${TAG_NAME#v}
-
-          gh release create "$TAG_NAME" \
-            --title "Release $TAG_NAME" \
-            --draft=false \
-            --prerelease=false \
-            --generate-notes
+          # Check if release already exists
+          if gh release view "$TAG_NAME" > /dev/null 2>&1; then
+            echo "Release $TAG_NAME already exists, skipping creation"
+          else
+            gh release create "$TAG_NAME" \
+              --title "Release $TAG_NAME" \
+              --draft=false \
+              --prerelease=false \
+              --generate-notes
+          fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
