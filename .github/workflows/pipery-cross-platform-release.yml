@@ -13,6 +13,7 @@ permissions:
 
 env:
   GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+  GITLAB_GROUP_ID: ${{ secrets.GITLAB_GROUP_ID }}
   BITBUCKET_TOKEN: ${{ secrets.BITBUCKET_TOKEN }}
   BITBUCKET_WORKSPACE: ${{ secrets.BITBUCKET_WORKSPACE }}
 
