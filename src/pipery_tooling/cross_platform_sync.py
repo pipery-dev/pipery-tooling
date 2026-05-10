@@ -115,8 +115,14 @@ class PlatformSync:
                 # Push all branches and tags
                 logger.info(f"Pushing to {platform}: {repo}")
                 try:
-                    remote.push(all=True)
-                    remote.push(tags=True)
+                    # Push branches
+                    for info in remote.push(all=True):
+                        logger.debug(f"Push info: {info.ref} - {info.flags}")
+
+                    # Push tags
+                    for info in remote.push(tags=True):
+                        logger.debug(f"Push info: {info.ref} - {info.flags}")
+
                     logger.info(f"Successfully pushed all branches and tags to {platform}")
                 except Exception as e:
                     logger.error(f"Failed to push to {platform}: {e}")
