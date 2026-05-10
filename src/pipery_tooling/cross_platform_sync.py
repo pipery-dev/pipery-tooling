@@ -115,13 +115,13 @@ class PlatformSync:
                 # Push all branches and tags
                 logger.info(f"Pushing to {platform}: {repo}")
                 try:
-                    # Push branches
-                    remote.push(all=True)
-                    logger.debug("Pushed all branches")
+                    # Push branches using refs/heads/*
+                    logger.debug(f"Pushing all branches to {platform}")
+                    git_repo.git.push("target", "+refs/heads/*:refs/heads/*")
 
-                    # Push tags (with force to handle existing tags)
-                    remote.push(tags=True, force=True)
-                    logger.debug("Pushed all tags")
+                    # Push tags using refs/tags/*
+                    logger.debug(f"Pushing all tags to {platform}")
+                    git_repo.git.push("target", "refs/tags/*:refs/tags/*")
 
                     logger.info(f"Successfully pushed all branches and tags to {platform}")
                 except Exception as e:
