@@ -18,8 +18,6 @@ EXCLUDE_PATTERNS = {
     ".gitignore",
     ".github",
     "action.yml",
-    "bitbucket-pipelines.yml",
-    ".gitlab-ci.yml",
     ".gitattributes",
 }
 
@@ -114,11 +112,12 @@ class PlatformSync:
 
                 remote = git_repo.create_remote("target", target_url)
 
-                # Push all branches
+                # Push all branches and tags
                 logger.info(f"Pushing to {platform}: {repo}")
                 try:
                     remote.push(all=True)
-                    logger.info(f"Successfully pushed all branches to {platform}")
+                    remote.push(tags=True)
+                    logger.info(f"Successfully pushed all branches and tags to {platform}")
                 except Exception as e:
                     logger.error(f"Failed to push to {platform}: {e}")
                     return {"status": "failed", "error": str(e)}
@@ -133,11 +132,11 @@ class PlatformSync:
         """Remove platform-specific files that shouldn't be synced."""
         excluded = EXCLUDE_PATTERNS.copy()
 
-        # Keep platform-specific config
-        if platform == "gitlab":
-            excluded.discard(".gitlab-ci.yml")
-        elif platform == "bitbucket":
-            excluded.discard("bitbucket-pipelines.yml")
+        # Exclude platform-specific templates from other platforms
+        if platform != "bitbucket":
+            excluded.add("bitbucket-pipelines.yml")
+        if platform != "gitlab":
+            excluded.add(".gitlab-ci.template.yml")
 
         for pattern in excluded:
             path = Path(repo_path) / pattern
