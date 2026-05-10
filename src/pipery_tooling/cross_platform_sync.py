@@ -67,10 +67,19 @@ class PlatformSync:
             with tempfile.TemporaryDirectory() as tmpdir:
                 local_repo_path = str(Path(tmpdir) / "repo")
 
-                # Clone from GitHub
+                # Clone from GitHub with all branches
                 logger.info(f"Cloning GitHub repo: {github_repo}")
                 github_url = f"https://github.com/{github_repo}"
-                git_repo = Repo.clone_from(github_url, local_repo_path)
+                git_repo = Repo.clone_from(github_url, local_repo_path, bare=False, mirror=False)
+
+                # Fetch all branches as local tracking branches
+                origin = git_repo.remote("origin")
+                for ref in origin.refs:
+                    if ref.remote_head != "HEAD":
+                        try:
+                            git_repo.create_head(ref.remote_head, ref.commit)
+                        except:
+                            pass  # Branch may already exist locally
 
                 # Determine target SSH URL based on platform
                 if platform == "gitlab":
@@ -115,13 +124,13 @@ class PlatformSync:
                 # Push all branches and tags
                 logger.info(f"Pushing to {platform}: {repo}")
                 try:
-                    # Push branches using refs/heads/*
+                    # Push all branches with force
                     logger.debug(f"Pushing all branches to {platform}")
-                    git_repo.git.push("target", "+refs/heads/*:refs/heads/*")
+                    remote.push(all=True, force=True)
 
-                    # Push tags using refs/tags/*
+                    # Push all tags with force
                     logger.debug(f"Pushing all tags to {platform}")
-                    git_repo.git.push("target", "refs/tags/*:refs/tags/*")
+                    remote.push(tags=True, force=True)
 
                     logger.info(f"Successfully pushed all branches and tags to {platform}")
                 except Exception as e:
