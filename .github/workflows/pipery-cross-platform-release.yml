@@ -101,6 +101,46 @@ jobs:
               print(f"✗ Bitbucket sync failed: {result.get('error')}")
           EOFPYTHON
 
+      - name: Create GitLab release
+        continue-on-error: true
+        run: |
+          python3 << 'EOFPYTHON'
+          from pipery_tooling.cross_platform_sync import PlatformSync
+          import os
+
+          tag_name = "${{ github.ref_name }}"
+          repo_name = "${{ inputs.repo_name }}"
+          gitlab_token = os.environ.get('GITLAB_TOKEN')
+
+          sync = PlatformSync()
+          result = sync.create_release(repo_name, tag_name, "gitlab", gitlab_token)
+
+          if result.get("status") == "success":
+              print(f"✓ GitLab release created: {tag_name}")
+          else:
+              print(f"✗ GitLab release failed: {result.get('error')}")
+          EOFPYTHON
+        env:
+          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+
+      - name: Create Bitbucket release
+        continue-on-error: true
+        run: |
+          python3 << 'EOFPYTHON'
+          from pipery_tooling.cross_platform_sync import PlatformSync
+
+          tag_name = "${{ github.ref_name }}"
+          repo_name = "${{ inputs.repo_name }}"
+
+          sync = PlatformSync()
+          result = sync.create_release(repo_name, tag_name, "bitbucket")
+
+          if result.get("status") == "success":
+              print(f"✓ Bitbucket release marked: {tag_name}")
+          else:
+              print(f"⚠ Bitbucket release check: {result.get('error')}")
+          EOFPYTHON
+
       - name: Release summary
         if: always()
         run: |

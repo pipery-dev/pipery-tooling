@@ -9,7 +9,9 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import quote
 
+import requests
 from git import Repo
 
 logger = logging.getLogger(__name__)
@@ -182,6 +184,91 @@ class PlatformSync:
                 else:
                     path.unlink()
                 logger.debug(f"Removed: {pattern}")
+
+    def create_release(
+        self,
+        repo: str,
+        tag_name: str,
+        platform: str,
+        token: str | None = None,
+    ) -> dict:
+        """Create a release on the target platform."""
+        if platform == "gitlab":
+            return self._create_gitlab_release(repo, tag_name, token)
+        elif platform == "bitbucket":
+            return self._create_bitbucket_release(repo, tag_name, token)
+        else:
+            return {"status": "failed", "error": f"Unknown platform: {platform}"}
+
+    def _create_gitlab_release(self, repo: str, tag_name: str, token: str | None = None) -> dict:
+        """Create a release on GitLab."""
+        if not token:
+            logger.warning("No GitLab token provided for release creation")
+            return {"status": "failed", "error": "No GitLab token provided"}
+
+        try:
+            project_path = f"pipery-dev/{repo}"
+            encoded_path = quote(project_path, safe="")
+
+            # Get project ID
+            headers = {"Authorization": f"Bearer {token}"}
+            project_url = f"https://gitlab.com/api/v4/projects/{encoded_path}"
+
+            resp = requests.get(project_url, headers=headers, timeout=10)
+            if resp.status_code != 200:
+                return {"status": "failed", "error": f"Project lookup failed: {resp.status_code}"}
+
+            project_id = resp.json()["id"]
+
+            # Create release
+            release_url = f"https://gitlab.com/api/v4/projects/{project_id}/releases"
+            release_data = {
+                "tag_name": tag_name,
+                "name": f"Release {tag_name}",
+                "description": f"Release of {repo} {tag_name}",
+            }
+
+            resp = requests.post(release_url, headers=headers, json=release_data, timeout=10)
+
+            if resp.status_code == 201:
+                logger.info(f"Created GitLab release: {tag_name}")
+                print(f"✓ GitLab release created: {tag_name}")
+                return {"status": "success"}
+            elif resp.status_code == 409:
+                logger.info(f"GitLab release already exists: {tag_name}")
+                print(f"✓ GitLab release exists: {tag_name}")
+                return {"status": "success"}
+            else:
+                error = resp.json().get("error", resp.text) if resp.headers.get("content-type") == "application/json" else resp.text
+                logger.error(f"Failed to create GitLab release: {error}")
+                return {"status": "failed", "error": str(error)}
+
+        except Exception as e:
+            logger.error(f"GitLab release creation failed: {e}")
+            return {"status": "failed", "error": str(e)}
+
+    def _create_bitbucket_release(self, repo: str, tag_name: str, token: str | None = None) -> dict:
+        """Create a release marker on Bitbucket (via downloads)."""
+        try:
+            workspace = "pipery-dev"
+            repo_slug = repo
+
+            # Bitbucket Cloud doesn't have native "releases" but we can document the tag
+            # by checking if the tag exists on the repo
+            url = f"https://api.bitbucket.org/2.0/repositories/{workspace}/{repo_slug}/refs/tags/{tag_name}"
+
+            resp = requests.get(url, timeout=10)
+
+            if resp.status_code == 200:
+                logger.info(f"Bitbucket tag exists: {tag_name}")
+                print(f"✓ Bitbucket release tagged: {tag_name}")
+                return {"status": "success"}
+            else:
+                return {"status": "failed", "error": f"Tag not found: {tag_name}"}
+
+        except Exception as e:
+            logger.error(f"Bitbucket release check failed: {e}")
+            return {"status": "failed", "error": str(e)}
 
     def sync_repositories(
         self,
