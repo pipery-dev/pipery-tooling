@@ -83,10 +83,12 @@ class PlatformSync:
                         except:
                             pass  # Branch may already exist locally
                 logger.info(f"Created local branches: {branches_created}")
+                print(f"[SYNC] Created {len(branches_created)} local branches: {branches_created[:5]}...")
 
                 # Log all tags
                 tags = [tag.name for tag in git_repo.tags]
-                logger.info(f"Available tags in clone: {tags[:10]}")  # Log first 10 tags
+                logger.info(f"Available tags in clone: {tags[:10]}")
+                print(f"[SYNC] Available tags: {len(tags)} total")
 
                 # Determine target SSH URL based on platform
                 if platform == "gitlab":
@@ -132,21 +134,28 @@ class PlatformSync:
                 logger.info(f"Pushing to {platform}: {repo}")
                 local_branches = [b.name for b in git_repo.heads]
                 logger.info(f"Local branches to push: {local_branches}")
+                print(f"[SYNC] Local branches: {len(local_branches)} - {local_branches[:5]}...")
 
                 try:
                     # Push all branches with force
                     logger.info(f"Pushing all branches to {platform}")
+                    print(f"[SYNC] Pushing branches to {platform}...")
                     push_result = remote.push(all=True, force=True)
                     logger.info(f"Branch push result: {len(push_result)} refs pushed")
+                    print(f"[SYNC] Pushed {len(push_result)} refs")
 
                     # Push all tags with force
                     logger.info(f"Pushing all tags to {platform}")
+                    print(f"[SYNC] Pushing tags to {platform}...")
                     tag_result = remote.push(tags=True, force=True)
                     logger.info(f"Tag push result: {len(tag_result)} refs pushed")
+                    print(f"[SYNC] Pushed {len(tag_result)} tag refs")
 
                     logger.info(f"Successfully pushed all branches and tags to {platform}")
+                    print(f"[SYNC] Sync to {platform} completed successfully")
                 except Exception as e:
                     logger.error(f"Failed to push to {platform}: {e}")
+                    print(f"[SYNC] Error: {e}")
                     return {"status": "failed", "error": str(e)}
 
                 return {"status": "success"}
