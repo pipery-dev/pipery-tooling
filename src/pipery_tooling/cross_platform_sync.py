@@ -74,12 +74,19 @@ class PlatformSync:
 
                 # Fetch all branches as local tracking branches
                 origin = git_repo.remote("origin")
+                branches_created = []
                 for ref in origin.refs:
                     if ref.remote_head != "HEAD":
                         try:
                             git_repo.create_head(ref.remote_head, ref.commit)
+                            branches_created.append(ref.remote_head)
                         except:
                             pass  # Branch may already exist locally
+                logger.info(f"Created local branches: {branches_created}")
+
+                # Log all tags
+                tags = [tag.name for tag in git_repo.tags]
+                logger.info(f"Available tags in clone: {tags[:10]}")  # Log first 10 tags
 
                 # Determine target SSH URL based on platform
                 if platform == "gitlab":
@@ -123,14 +130,19 @@ class PlatformSync:
 
                 # Push all branches and tags
                 logger.info(f"Pushing to {platform}: {repo}")
+                local_branches = [b.name for b in git_repo.heads]
+                logger.info(f"Local branches to push: {local_branches}")
+
                 try:
                     # Push all branches with force
-                    logger.debug(f"Pushing all branches to {platform}")
-                    remote.push(all=True, force=True)
+                    logger.info(f"Pushing all branches to {platform}")
+                    push_result = remote.push(all=True, force=True)
+                    logger.info(f"Branch push result: {len(push_result)} refs pushed")
 
                     # Push all tags with force
-                    logger.debug(f"Pushing all tags to {platform}")
-                    remote.push(tags=True, force=True)
+                    logger.info(f"Pushing all tags to {platform}")
+                    tag_result = remote.push(tags=True, force=True)
+                    logger.info(f"Tag push result: {len(tag_result)} refs pushed")
 
                     logger.info(f"Successfully pushed all branches and tags to {platform}")
                 except Exception as e:
