@@ -11,12 +11,6 @@ on:
 permissions:
   contents: write
 
-env:
-  GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-  GITLAB_GROUP_ID: ${{ secrets.GITLAB_GROUP_ID }}
-  BITBUCKET_TOKEN: ${{ secrets.BITBUCKET_TOKEN }}
-  BITBUCKET_WORKSPACE: ${{ secrets.BITBUCKET_WORKSPACE }}
-
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -31,6 +25,15 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_ID }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -t ed25519 gitlab.com >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keyscan -t ed25519 bitbucket.org >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+
       - name: Install pipery-tooling
         run: |
           pip install --upgrade pip
@@ -38,35 +41,16 @@ jobs:
 
       - name: Configure Git
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Check token availability
-        run: |
-          echo "Checking token availability..."
-
-          if [ -z "$GITLAB_TOKEN" ]; then
-            echo "WARNING: GITLAB_TOKEN not available"
-          else
-            echo "✓ GITLAB_TOKEN is available (length: ${#GITLAB_TOKEN})"
-          fi
-
-          if [ -z "$BITBUCKET_TOKEN" ]; then
-            echo "WARNING: BITBUCKET_TOKEN not available"
-          else
-            echo "✓ BITBUCKET_TOKEN is available (length: ${#BITBUCKET_TOKEN})"
-          fi
+          git config --global user.name "pipery-sync"
+          git config --global user.email "sync@pipery.dev"
 
       - name: Create GitHub release
-        id: github_release
         continue-on-error: true
         run: |
           TAG_NAME=${GITHUB_REF#refs/tags/}
-          echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
 
-          # Check if release already exists
           if gh release view "$TAG_NAME" > /dev/null 2>&1; then
-            echo "Release $TAG_NAME already exists, skipping creation"
+            echo "Release $TAG_NAME already exists"
           else
             gh release create "$TAG_NAME" \
               --title "Release $TAG_NAME" \
@@ -78,52 +62,44 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Sync to GitLab
-        if: env.GITLAB_TOKEN != ''
         continue-on-error: true
         run: |
           echo "Syncing ${{ inputs.repo_name }} to GitLab..."
-          pipery-actions sync \
-            --repos pipery-dev/${{ inputs.repo_name }} \
-            --platform gitlab \
-            --verbose
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          python3 << 'EOFPYTHON'
+          from pipery_tooling.cross_platform_sync import PlatformSync
+
+          sync = PlatformSync()
+          result = sync.sync_to_platform(
+              "${{ inputs.repo_name }}",
+              "gitlab",
+              "pipery-dev/${{ inputs.repo_name }}"
+          )
+
+          if result.get("status") == "success":
+              print("✓ GitLab sync successful")
+          else:
+              print(f"✗ GitLab sync failed: {result.get('error')}")
+          EOFPYTHON
 
       - name: Sync to Bitbucket
-        if: env.BITBUCKET_TOKEN != ''
         continue-on-error: true
         run: |
           echo "Syncing ${{ inputs.repo_name }} to Bitbucket..."
-          pipery-actions sync \
-            --repos pipery-dev/${{ inputs.repo_name }} \
-            --platform bitbucket \
-            --verbose
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          python3 << 'EOFPYTHON'
+          from pipery_tooling.cross_platform_sync import PlatformSync
 
-      - name: Create tags on GitLab
-        if: env.GITLAB_TOKEN != ''
-        continue-on-error: true
-        run: |
-          echo "Creating tags on GitLab..."
-          pipery-actions create-tags \
-            --platform gitlab \
-            --repos ${{ inputs.repo_name }} \
-            --verbose
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          sync = PlatformSync()
+          result = sync.sync_to_platform(
+              "${{ inputs.repo_name }}",
+              "bitbucket",
+              "pipery-dev/${{ inputs.repo_name }}"
+          )
 
-      - name: Create tags on Bitbucket
-        if: env.BITBUCKET_TOKEN != ''
-        continue-on-error: true
-        run: |
-          echo "Creating tags on Bitbucket..."
-          pipery-actions create-tags \
-            --platform bitbucket \
-            --repos ${{ inputs.repo_name }} \
-            --verbose
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          if result.get("status") == "success":
+              print("✓ Bitbucket sync successful")
+          else:
+              print(f"✗ Bitbucket sync failed: {result.get('error')}")
+          EOFPYTHON
 
       - name: Release summary
         if: always()
@@ -131,6 +107,4 @@ jobs:
           echo "Release Summary"
           echo "=============="
           echo "Repository: ${{ inputs.repo_name }}"
-          echo "GitHub Release: ${{ steps.github_release.outputs.tag_name }}"
-          echo "GitLab Sync: ${{ env.GITLAB_TOKEN != '' && 'Enabled' || 'Skipped (no token)' }}"
-          echo "Bitbucket Sync: ${{ env.BITBUCKET_TOKEN != '' && 'Enabled' || 'Skipped (no token)' }}"
+          echo "Tag: ${GITHUB_REF#refs/tags/}"
