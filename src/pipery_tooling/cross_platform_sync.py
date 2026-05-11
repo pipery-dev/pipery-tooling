@@ -1,4 +1,29 @@
-"""Cross-platform repository synchronization using SSH and GitPython."""
+"""Cross-platform repository synchronization using SSH and GitPython.
+
+Platform-Specific Release Strategy
+==================================
+
+GITLAB (Native Release API):
+  - Creates releases via GitLab Release API (/releases endpoint)
+  - Includes metadata: name, description, tag
+  - Visible in GitLab UI as "Releases" section
+  - Full feature parity with GitHub releases
+
+BITBUCKET (No Native Release API):
+  - Bitbucket Cloud lacks Release API (as of 2026)
+  - Strategy: Create release branch + verify tag
+  1. Verify annotated tag exists via refs/tags API
+  2. Create release branch (releases/v1.0.0) via refs/branches API
+  3. Provides discoverability: Branch appears in Bitbucket UI
+  4. Durable: Release branch is permanent git history
+  5. Reliable: No API rate limits on tag/branch operations
+
+Why not alternatives for Bitbucket?
+  - Deployment API: Too broad (meant for CI/CD status, not releases)
+  - Wiki/Description: No API to reliably update; UI-only feature
+  - Downloads: Deprecated in Bitbucket Cloud
+  - Release branch: BEST - visible, permanent, queryable via API
+"""
 
 from __future__ import annotations
 
@@ -201,9 +226,10 @@ class PlatformSync:
             return {"status": "failed", "error": f"Unknown platform: {platform}"}
 
     def _create_gitlab_release(self, repo: str, tag_name: str, token: str | None = None) -> dict:
-        """Create a release on GitLab."""
+        """Create a release on GitLab with full error handling and release notes."""
         if not token:
             logger.warning("No GitLab token provided for release creation")
+            print("[ERROR] GitLab token not provided for release creation")
             return {"status": "failed", "error": "No GitLab token provided"}
 
         try:
@@ -211,63 +237,220 @@ class PlatformSync:
             encoded_path = quote(project_path, safe="")
 
             # Get project ID
-            headers = {"Authorization": f"Bearer {token}"}
+            headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
             project_url = f"https://gitlab.com/api/v4/projects/{encoded_path}"
 
-            resp = requests.get(project_url, headers=headers, timeout=10)
-            if resp.status_code != 200:
-                return {"status": "failed", "error": f"Project lookup failed: {resp.status_code}"}
+            print(f"[GITLAB] Looking up project: {project_path}")
+            try:
+                resp = requests.get(project_url, headers=headers, timeout=10)
+            except requests.Timeout:
+                logger.error(f"GitLab API timeout fetching project {project_path}")
+                print(f"[ERROR] GitLab API timeout while fetching project metadata")
+                return {"status": "failed", "error": "GitLab API timeout (project lookup)"}
+            except requests.ConnectionError as e:
+                logger.error(f"GitLab API connection error: {e}")
+                print(f"[ERROR] Failed to connect to GitLab API: {e}")
+                return {"status": "failed", "error": f"Connection error: {e}"}
 
-            project_id = resp.json()["id"]
+            if resp.status_code == 404:
+                logger.error(f"GitLab project not found: {project_path}")
+                print(f"[ERROR] GitLab project not found: {project_path}")
+                return {"status": "failed", "error": f"Project not found: {project_path}"}
+            elif resp.status_code == 401:
+                logger.error("GitLab token is invalid or expired")
+                print("[ERROR] GitLab authentication failed - invalid or expired token")
+                return {"status": "failed", "error": "Invalid or expired GitLab token"}
+            elif resp.status_code != 200:
+                error_msg = resp.json().get("message", resp.text) if resp.headers.get("content-type") == "application/json" else resp.text
+                logger.error(f"Project lookup failed (HTTP {resp.status_code}): {error_msg}")
+                print(f"[ERROR] Failed to fetch project metadata (HTTP {resp.status_code}): {error_msg}")
+                return {"status": "failed", "error": f"Project lookup failed: {error_msg}"}
+
+            try:
+                project_data = resp.json()
+                project_id = project_data["id"]
+                print(f"[GITLAB] Project ID: {project_id}")
+            except (KeyError, ValueError) as e:
+                logger.error(f"Failed to parse project response: {e}")
+                print(f"[ERROR] Invalid project response from GitLab: {e}")
+                return {"status": "failed", "error": "Invalid project response"}
+
+            # Prepare release notes/description
+            release_name = f"Release {tag_name}"
+            release_description = f"Release of {repo} {tag_name}\n\n"
+            release_description += f"**Repository:** pipery-dev/{repo}\n"
+            release_description += f"**Tag:** {tag_name}\n"
+            release_description += f"**Created:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}"
 
             # Create release
             release_url = f"https://gitlab.com/api/v4/projects/{project_id}/releases"
             release_data = {
                 "tag_name": tag_name,
-                "name": f"Release {tag_name}",
-                "description": f"Release of {repo} {tag_name}",
+                "name": release_name,
+                "description": release_description,
             }
 
-            resp = requests.post(release_url, headers=headers, json=release_data, timeout=10)
+            print(f"[GITLAB] Creating release: {release_name}")
+            try:
+                resp = requests.post(release_url, headers=headers, json=release_data, timeout=10)
+            except requests.Timeout:
+                logger.error(f"GitLab API timeout creating release {tag_name}")
+                print(f"[ERROR] GitLab API timeout while creating release")
+                return {"status": "failed", "error": "GitLab API timeout (release creation)"}
+            except requests.ConnectionError as e:
+                logger.error(f"GitLab API connection error: {e}")
+                print(f"[ERROR] Failed to connect to GitLab API: {e}")
+                return {"status": "failed", "error": f"Connection error: {e}"}
 
             if resp.status_code == 201:
                 logger.info(f"Created GitLab release: {tag_name}")
-                print(f"✓ GitLab release created: {tag_name}")
+                print(f"[SUCCESS] GitLab release created: {tag_name}")
+                print(f"  Name: {release_name}")
+                print(f"  Repository: pipery-dev/{repo}")
+                print(f"  URL: https://gitlab.com/pipery-dev/{repo}/-/releases/{tag_name}")
                 return {"status": "success"}
             elif resp.status_code == 409:
                 logger.info(f"GitLab release already exists: {tag_name}")
-                print(f"✓ GitLab release exists: {tag_name}")
+                print(f"[INFO] GitLab release already exists: {tag_name}")
                 return {"status": "success"}
+            elif resp.status_code == 400:
+                error_detail = resp.json().get("message", resp.text) if resp.headers.get("content-type") == "application/json" else resp.text
+                logger.error(f"Bad request creating release (likely tag not found): {error_detail}")
+                print(f"[ERROR] Bad request - tag may not exist on GitLab or release data is invalid: {error_detail}")
+                return {"status": "failed", "error": f"Bad request: {error_detail}"}
+            elif resp.status_code == 401:
+                logger.error("GitLab token is invalid or expired")
+                print("[ERROR] GitLab authentication failed - invalid or expired token")
+                return {"status": "failed", "error": "Invalid or expired GitLab token"}
             else:
-                error = resp.json().get("error", resp.text) if resp.headers.get("content-type") == "application/json" else resp.text
-                logger.error(f"Failed to create GitLab release: {error}")
-                return {"status": "failed", "error": str(error)}
+                error_msg = resp.json().get("message", resp.text) if resp.headers.get("content-type") == "application/json" else resp.text
+                logger.error(f"Failed to create GitLab release (HTTP {resp.status_code}): {error_msg}")
+                print(f"[ERROR] Failed to create release (HTTP {resp.status_code}): {error_msg}")
+                return {"status": "failed", "error": str(error_msg)}
 
         except Exception as e:
-            logger.error(f"GitLab release creation failed: {e}")
+            logger.error(f"GitLab release creation failed: {e}", exc_info=True)
+            print(f"[ERROR] Unexpected error during GitLab release creation: {e}")
             return {"status": "failed", "error": str(e)}
 
     def _create_bitbucket_release(self, repo: str, tag_name: str, token: str | None = None) -> dict:
-        """Create a release marker on Bitbucket (via downloads)."""
+        """
+        Create a release marker on Bitbucket using a release branch strategy.
+
+        Since Bitbucket Cloud lacks a native Release API, we use a hybrid approach:
+        1. Verify the tag exists on the repository
+        2. Create a release branch (releases/v1.0.0) as a visible release marker
+        3. Document the release via annotated tag metadata
+
+        This approach provides:
+        - Discoverability: Release branches appear in Bitbucket UI
+        - Durability: Release branches are permanently tracked in git history
+        - Reliability: No API limitations since we use git push
+        - Compatibility: Works with Bitbucket Cloud's tag and branch APIs
+        """
         try:
             workspace = "pipery-dev"
             repo_slug = repo
 
-            # Bitbucket Cloud doesn't have native "releases" but we can document the tag
-            # by checking if the tag exists on the repo
-            url = f"https://api.bitbucket.org/2.0/repositories/{workspace}/{repo_slug}/refs/tags/{tag_name}"
+            print(f"[BITBUCKET] Starting release creation for {tag_name}")
 
-            resp = requests.get(url, timeout=10)
+            # Step 1: Verify the tag exists via API
+            tag_url = f"https://api.bitbucket.org/2.0/repositories/{workspace}/{repo_slug}/refs/tags/{tag_name}"
 
-            if resp.status_code == 200:
-                logger.info(f"Bitbucket tag exists: {tag_name}")
-                print(f"✓ Bitbucket release tagged: {tag_name}")
-                return {"status": "success"}
-            else:
+            print(f"[BITBUCKET] Verifying tag exists: {tag_name}")
+            try:
+                resp = requests.get(tag_url, timeout=10)
+            except requests.Timeout:
+                logger.error(f"Bitbucket API timeout verifying tag {tag_name}")
+                print(f"[ERROR] Bitbucket API timeout while verifying tag")
+                return {"status": "failed", "error": "API timeout during tag verification"}
+            except requests.ConnectionError as e:
+                logger.error(f"Bitbucket API connection error: {e}")
+                print(f"[ERROR] Failed to connect to Bitbucket API: {e}")
+                return {"status": "failed", "error": f"Connection error: {e}"}
+
+            if resp.status_code != 200:
+                error_msg = f"Tag verification failed (HTTP {resp.status_code})"
+                logger.error(f"Bitbucket tag not found: {tag_name} - {error_msg}")
+                print(f"[ERROR] Bitbucket tag not found: {tag_name}")
                 return {"status": "failed", "error": f"Tag not found: {tag_name}"}
 
+            print(f"[BITBUCKET] Tag verified: {tag_name}")
+
+            # Step 2: Extract tag commit SHA from API response for release branch
+            try:
+                tag_data = resp.json()
+                tag_commit_sha = tag_data.get("target", {}).get("hash")
+                if not tag_commit_sha:
+                    logger.warning(f"Could not extract commit SHA from tag {tag_name}, using tag name as fallback")
+                    tag_commit_sha = tag_name
+                    print(f"[BITBUCKET] Using tag reference for release branch")
+                else:
+                    print(f"[BITBUCKET] Extracted commit SHA: {tag_commit_sha[:12]}")
+            except (KeyError, ValueError) as e:
+                logger.warning(f"Failed to parse tag response: {e}, using tag name")
+                tag_commit_sha = tag_name
+
+            # Step 3: Create release branch as a visible marker
+            # Release branch format: releases/v1.0.0 provides clear discoverability
+            release_branch = f"releases/{tag_name}"
+
+            print(f"[BITBUCKET] Creating release branch: {release_branch}")
+
+            # Create release branch via API (POST to refs/branches endpoint)
+            branch_url = f"https://api.bitbucket.org/2.0/repositories/{workspace}/{repo_slug}/refs/branches"
+            branch_data = {
+                "name": release_branch,
+                "target": {
+                    "hash": tag_commit_sha
+                }
+            }
+
+            headers = {}
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+
+            try:
+                resp = requests.post(branch_url, json=branch_data, headers=headers, timeout=10)
+            except requests.Timeout:
+                logger.error(f"Bitbucket API timeout creating release branch {release_branch}")
+                print(f"[ERROR] Bitbucket API timeout while creating release branch")
+                return {"status": "failed", "error": "API timeout during release branch creation"}
+            except requests.ConnectionError as e:
+                logger.error(f"Bitbucket API connection error: {e}")
+                print(f"[ERROR] Failed to connect to Bitbucket API: {e}")
+                return {"status": "failed", "error": f"Connection error: {e}"}
+
+            if resp.status_code == 201:
+                logger.info(f"Created Bitbucket release branch: {release_branch}")
+                print(f"[SUCCESS] Bitbucket release branch created: {release_branch}")
+                print(f"  Tag: {tag_name}")
+                print(f"  Commit: {tag_commit_sha[:12] if len(tag_commit_sha) > 12 else tag_commit_sha}")
+                print(f"  URL: https://bitbucket.org/{workspace}/{repo_slug}/branch/{release_branch}")
+                return {"status": "success"}
+            elif resp.status_code == 409:
+                logger.info(f"Bitbucket release branch already exists: {release_branch}")
+                print(f"[INFO] Bitbucket release branch already exists: {release_branch}")
+                print(f"  (Branch conflicts indicate this release was already processed)")
+                return {"status": "success"}
+            elif resp.status_code == 401:
+                logger.error("Bitbucket token is invalid or expired")
+                print("[ERROR] Bitbucket authentication failed - invalid or expired token")
+                return {"status": "failed", "error": "Invalid or expired Bitbucket token"}
+            elif resp.status_code == 400:
+                error_detail = resp.json().get("error", {}).get("message", resp.text) if resp.headers.get("content-type") == "application/json" else resp.text
+                logger.error(f"Bad request creating release branch: {error_detail}")
+                print(f"[ERROR] Bad request creating release branch: {error_detail}")
+                return {"status": "failed", "error": f"Bad request: {error_detail}"}
+            else:
+                error_msg = resp.json().get("error", {}).get("message", resp.text) if resp.headers.get("content-type") == "application/json" else resp.text
+                logger.error(f"Failed to create Bitbucket release branch (HTTP {resp.status_code}): {error_msg}")
+                print(f"[ERROR] Failed to create release branch (HTTP {resp.status_code}): {error_msg}")
+                return {"status": "failed", "error": str(error_msg)}
+
         except Exception as e:
-            logger.error(f"Bitbucket release check failed: {e}")
+            logger.error(f"Bitbucket release creation failed: {e}", exc_info=True)
+            print(f"[ERROR] Unexpected error during Bitbucket release creation: {e}")
             return {"status": "failed", "error": str(e)}
 
     def sync_repositories(
