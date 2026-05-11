@@ -125,7 +125,17 @@ class PlatformSync:
                 else:
                     return {"status": "failed", "error": f"Unknown platform: {platform}"}
 
-                # Remove excluded files
+                # Remove excluded files from git index (affects all branches)
+                excluded_for_platform = self._get_excluded_files(platform)
+                print(f"[SYNC] Removing platform-specific files: {excluded_for_platform}")
+                for file_pattern in excluded_for_platform:
+                    try:
+                        git_repo.index.remove([file_pattern], working_tree=True)
+                        print(f"[SYNC] Removed from git: {file_pattern}")
+                    except:
+                        pass  # File may not exist
+
+                # Also remove from working directory
                 self._remove_excluded_files(local_repo_path, platform)
 
                 # Create sync branch
@@ -143,7 +153,7 @@ class PlatformSync:
                     git_config.set_value("user", "name", "pipery-sync")
                     git_config.set_value("user", "email", "sync@pipery.dev")
 
-                # Stage and commit changes
+                # Stage and commit changes (removed files)
                 git_repo.index.add("*")
                 try:
                     git_repo.index.commit(f"Sync from GitHub - {datetime.now().isoformat()}")
@@ -191,15 +201,24 @@ class PlatformSync:
             logger.error(f"Sync failed: {e}")
             return {"status": "failed", "error": str(e)}
 
-    def _remove_excluded_files(self, repo_path: str, platform: str):
-        """Remove platform-specific files that shouldn't be synced."""
+    def _get_excluded_files(self, platform: str) -> set[str]:
+        """Get list of files to exclude for a specific platform."""
         excluded = EXCLUDE_PATTERNS.copy()
 
-        # Exclude platform-specific templates from other platforms
+        # Always exclude GitHub-specific files (action.yml)
+        excluded.add("action.yml")
+
+        # Exclude platform-specific CI/CD files from other platforms
         if platform != "bitbucket":
             excluded.add("bitbucket-pipelines.yml")
         if platform != "gitlab":
             excluded.add(".gitlab-ci.template.yml")
+
+        return excluded
+
+    def _remove_excluded_files(self, repo_path: str, platform: str):
+        """Remove platform-specific files that shouldn't be synced."""
+        excluded = self._get_excluded_files(platform)
 
         for pattern in excluded:
             path = Path(repo_path) / pattern
