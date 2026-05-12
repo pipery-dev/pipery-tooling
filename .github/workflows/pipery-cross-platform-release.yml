@@ -44,16 +44,46 @@ jobs:
           git config --global user.name "pipery-sync"
           git config --global user.email "sync@pipery.dev"
 
+      - name: Capture tagged commit SHA
+        id: tag_info
+        run: |
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          TAGGED_COMMIT=$(git rev-parse HEAD)
+          echo "tag_name=${TAG_NAME}" >> "$GITHUB_OUTPUT"
+          echo "tagged_commit=${TAGGED_COMMIT}" >> "$GITHUB_OUTPUT"
+
+      - name: Create platform release branches
+        run: |
+          python3 << 'EOFPYTHON'
+          from pathlib import Path
+          from pipery_tooling.release_branches import create_platform_release_branches
+
+          branches = create_platform_release_branches(
+              repo_dir=Path("."),
+              tag_name="${{ steps.tag_info.outputs.tag_name }}",
+              tagged_commit="${{ steps.tag_info.outputs.tagged_commit }}",
+          )
+          for platform, branch in branches.items():
+              print(f"Created: {branch}")
+          EOFPYTHON
+
+      - name: Push release branches to GitHub
+        run: |
+          TAG="${{ steps.tag_info.outputs.tag_name }}"
+          git push origin "release/github-${TAG}" --force
+          git push origin "release/gitlab-${TAG}" --force
+          git push origin "release/bitbucket-${TAG}" --force
+
       - name: Create GitHub release
         continue-on-error: true
         run: |
-          TAG_NAME=${GITHUB_REF#refs/tags/}
-
-          if gh release view "$TAG_NAME" > /dev/null 2>&1; then
-            echo "Release $TAG_NAME already exists"
+          TAG="${{ steps.tag_info.outputs.tag_name }}"
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "Release $TAG already exists"
           else
-            gh release create "$TAG_NAME" \
-              --title "Release $TAG_NAME" \
+            gh release create "$TAG" \
+              --title "Release $TAG" \
+              --target "release/github-${TAG}" \
               --draft=false \
               --prerelease=false \
               --generate-notes
@@ -64,7 +94,6 @@ jobs:
       - name: Sync to GitLab
         continue-on-error: true
         run: |
-          echo "Syncing ${{ inputs.repo_name }} to GitLab..."
           python3 << 'EOFPYTHON'
           from pipery_tooling.cross_platform_sync import PlatformSync
 
@@ -72,19 +101,18 @@ jobs:
           result = sync.sync_to_platform(
               "${{ inputs.repo_name }}",
               "gitlab",
-              "pipery-dev/${{ inputs.repo_name }}"
+              "pipery-dev/${{ inputs.repo_name }}",
+              tag_name="${{ steps.tag_info.outputs.tag_name }}",
           )
-
           if result.get("status") == "success":
-              print("✓ GitLab sync successful")
+              print("GitLab sync successful")
           else:
-              print(f"✗ GitLab sync failed: {result.get('error')}")
+              print(f"GitLab sync failed: {result.get('error')}")
           EOFPYTHON
 
       - name: Sync to Bitbucket
         continue-on-error: true
         run: |
-          echo "Syncing ${{ inputs.repo_name }} to Bitbucket..."
           python3 << 'EOFPYTHON'
           from pipery_tooling.cross_platform_sync import PlatformSync
 
@@ -92,13 +120,13 @@ jobs:
           result = sync.sync_to_platform(
               "${{ inputs.repo_name }}",
               "bitbucket",
-              "pipery-dev/${{ inputs.repo_name }}"
+              "pipery-dev/${{ inputs.repo_name }}",
+              tag_name="${{ steps.tag_info.outputs.tag_name }}",
           )
-
           if result.get("status") == "success":
-              print("✓ Bitbucket sync successful")
+              print("Bitbucket sync successful")
           else:
-              print(f"✗ Bitbucket sync failed: {result.get('error')}")
+              print(f"Bitbucket sync failed: {result.get('error')}")
           EOFPYTHON
 
       - name: Create GitLab release
@@ -108,43 +136,27 @@ jobs:
           from pipery_tooling.cross_platform_sync import PlatformSync
           import os
 
-          tag_name = "${{ github.ref_name }}"
-          repo_name = "${{ inputs.repo_name }}"
-          gitlab_token = os.environ.get('GITLAB_TOKEN')
-
           sync = PlatformSync()
-          result = sync.create_release(repo_name, tag_name, "gitlab", gitlab_token)
-
+          result = sync.create_release(
+              "${{ inputs.repo_name }}",
+              "${{ steps.tag_info.outputs.tag_name }}",
+              "gitlab",
+              os.environ.get("GITLAB_TOKEN"),
+          )
           if result.get("status") == "success":
-              print(f"✓ GitLab release created: {tag_name}")
+              print(f"GitLab release created: ${{ steps.tag_info.outputs.tag_name }}")
           else:
-              print(f"✗ GitLab release failed: {result.get('error')}")
+              print(f"GitLab release failed: {result.get('error')}")
           EOFPYTHON
         env:
           GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
 
-      - name: Create Bitbucket release
-        continue-on-error: true
-        run: |
-          python3 << 'EOFPYTHON'
-          from pipery_tooling.cross_platform_sync import PlatformSync
-
-          tag_name = "${{ github.ref_name }}"
-          repo_name = "${{ inputs.repo_name }}"
-
-          sync = PlatformSync()
-          result = sync.create_release(repo_name, tag_name, "bitbucket")
-
-          if result.get("status") == "success":
-              print(f"✓ Bitbucket release marked: {tag_name}")
-          else:
-              print(f"⚠ Bitbucket release check: {result.get('error')}")
-          EOFPYTHON
-
       - name: Release summary
         if: always()
         run: |
+          TAG="${{ steps.tag_info.outputs.tag_name }}"
           echo "Release Summary"
-          echo "=============="
+          echo "==============="
           echo "Repository: ${{ inputs.repo_name }}"
-          echo "Tag: ${GITHUB_REF#refs/tags/}"
+          echo "Tag:        ${TAG}"
+          echo "Branches:   release/github-${TAG}, release/gitlab-${TAG}, release/bitbucket-${TAG}"

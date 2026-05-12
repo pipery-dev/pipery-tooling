@@ -154,3 +154,129 @@ def _inline_scripts_in_file(
     file_path = repo_dir / pipeline_file
     if file_path.exists():
         inline_scripts(platform, file_path)
+
+
+def create_platform_release_branches(
+    repo_dir: Path,
+    tag_name: str,
+    tagged_commit: str,
+) -> dict[str, str]:
+    """
+    Create 3 platform-specific release branches from a tagged commit.
+
+    Works in detached HEAD context. Creates:
+    - release/github-{tag_name}: Full repository with all CI/CD files
+    - release/gitlab-{tag_name}: Excludes action.yml and bitbucket-pipelines.yml
+    - release/bitbucket-{tag_name}: Excludes action.yml and .gitlab-ci.template.yml
+
+    Args:
+        repo_dir: Path to the repository
+        tag_name: Tag name (e.g., "v1.0.1")
+        tagged_commit: Git commit SHA or ref pointing to the tagged commit
+
+    Returns:
+        Dictionary mapping platform names to their branch names:
+        {
+            "github": "release/github-v1.0.1",
+            "gitlab": "release/gitlab-v1.0.1",
+            "bitbucket": "release/bitbucket-v1.0.1",
+        }
+
+    Raises:
+        RuntimeError: If git operations fail or tagged_commit is invalid.
+    """
+    platforms: dict[str, tuple[Platform, list[str]]] = {
+        "github": ("github", []),
+        "gitlab": ("gitlab", ["action.yml", "bitbucket-pipelines.yml"]),
+        "bitbucket": ("bitbucket", ["action.yml", ".gitlab-ci.template.yml"]),
+    }
+
+    branch_map = {}
+
+    try:
+        # Verify the tagged commit exists
+        subprocess.run(
+            ["git", "rev-list", "-n", "1", tagged_commit],
+            cwd=repo_dir,
+            check=True,
+            capture_output=True,
+        )
+
+        for platform_key, (platform, files_to_remove) in platforms.items():
+            branch_name = f"release/{platform_key}-{tag_name}"
+            branch_map[platform_key] = branch_name
+
+            # Delete branch if it exists (for rerun safety)
+            if _branch_exists(repo_dir, branch_name):
+                subprocess.run(
+                    ["git", "branch", "-D", branch_name],
+                    cwd=repo_dir,
+                    check=True,
+                    capture_output=True,
+                )
+
+            # Create new branch from tagged commit (works in detached HEAD)
+            subprocess.run(
+                ["git", "checkout", "-b", branch_name, tagged_commit],
+                cwd=repo_dir,
+                check=True,
+                capture_output=True,
+            )
+
+            # Remove platform-specific files if any
+            if files_to_remove:
+                for file_to_remove in files_to_remove:
+                    _remove_file_gracefully(repo_dir, file_to_remove)
+
+                # Check if there are changes to commit
+                status = subprocess.run(
+                    ["git", "status", "--porcelain"],
+                    cwd=repo_dir,
+                    capture_output=True,
+                    text=True,
+                )
+
+                if status.stdout.strip():
+                    subprocess.run(
+                        ["git", "add", "."],
+                        cwd=repo_dir,
+                        check=True,
+                        capture_output=True,
+                    )
+                    subprocess.run(
+                        ["git", "commit", "-m", f"Remove {platform} incompatible files"],
+                        cwd=repo_dir,
+                        check=True,
+                        capture_output=True,
+                    )
+
+        return branch_map
+
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(
+            f"Failed to create platform release branches: {e.stderr}"
+        ) from e
+
+
+def _remove_file_gracefully(repo_dir: Path, file_path: str) -> None:
+    """
+    Remove a file from git and disk gracefully.
+
+    Uses git rm --cached --ignore-unmatch to handle missing files silently,
+    then removes the file from disk if it exists.
+
+    Args:
+        repo_dir: Path to the repository
+        file_path: Relative path to the file to remove
+    """
+    # Remove from git index (--ignore-unmatch prevents error if not tracked)
+    subprocess.run(
+        ["git", "rm", "--cached", "--ignore-unmatch", file_path],
+        cwd=repo_dir,
+        capture_output=True,
+    )
+
+    # Remove from disk if it exists
+    disk_path = repo_dir / file_path
+    if disk_path.exists():
+        disk_path.unlink()

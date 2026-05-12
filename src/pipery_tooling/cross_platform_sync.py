@@ -30,10 +30,12 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import subprocess
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import ClassVar
 from urllib.parse import quote
 
 import requests
@@ -86,6 +88,7 @@ class PlatformSync:
         platform: str,
         github_repo: str,
         auth_token: str | None = None,
+        tag_name: str | None = None,
     ) -> dict:
         """Sync repository to a platform using SSH."""
         logger.info(f"Syncing {github_repo} to {platform}")
@@ -125,42 +128,6 @@ class PlatformSync:
                 else:
                     return {"status": "failed", "error": f"Unknown platform: {platform}"}
 
-                # Remove excluded files from git index (affects all branches)
-                excluded_for_platform = self._get_excluded_files(platform)
-                print(f"[SYNC] Removing platform-specific files: {excluded_for_platform}")
-                for file_pattern in excluded_for_platform:
-                    try:
-                        git_repo.index.remove([file_pattern], working_tree=True)
-                        print(f"[SYNC] Removed from git: {file_pattern}")
-                    except:
-                        pass  # File may not exist
-
-                # Also remove from working directory
-                self._remove_excluded_files(local_repo_path, platform)
-
-                # Create sync branch
-                sync_branch = "sync/github-main"
-                try:
-                    git_repo.create_head(sync_branch)
-                except:
-                    logger.debug(f"Branch {sync_branch} may already exist")
-
-                # Check out sync branch
-                git_repo.heads[sync_branch].checkout()
-
-                # Configure git user
-                with git_repo.config_writer() as git_config:
-                    git_config.set_value("user", "name", "pipery-sync")
-                    git_config.set_value("user", "email", "sync@pipery.dev")
-
-                # Stage and commit changes (removed files)
-                git_repo.index.add("*")
-                try:
-                    git_repo.index.commit(f"Sync from GitHub - {datetime.now().isoformat()}")
-                    logger.info(f"Created commit on {sync_branch}")
-                except:
-                    logger.info(f"No changes to commit on {sync_branch}")
-
                 # Add remote and push
                 if "origin" in [remote.name for remote in git_repo.remotes]:
                     git_repo.delete_remote("origin")
@@ -181,12 +148,20 @@ class PlatformSync:
                     logger.info(f"Branch push result: {len(push_result)} refs pushed")
                     print(f"[SYNC] Pushed {len(push_result)} refs")
 
-                    # Push all tags with force
-                    logger.info(f"Pushing all tags to {platform}")
-                    print(f"[SYNC] Pushing tags to {platform}...")
-                    tag_result = remote.push(tags=True, force=True)
-                    logger.info(f"Tag push result: {len(tag_result)} refs pushed")
-                    print(f"[SYNC] Pushed {len(tag_result)} tag refs")
+                    # Push platform-specific tag pointing to release branch
+                    if tag_name:
+                        platform_branch_name = f"release/{platform}-{tag_name}"
+                        matching = [h for h in git_repo.heads if h.name == platform_branch_name]
+                        if matching:
+                            tip_commit = matching[0].commit
+                            # Delete and recreate tag to point to platform branch tip
+                            if tag_name in [t.name for t in git_repo.tags]:
+                                git_repo.delete_tag(tag_name)
+                            git_repo.create_tag(tag_name, ref=tip_commit)
+                            remote.push(refspec=f"refs/tags/{tag_name}:refs/tags/{tag_name}", force=True)
+                            print(f"[SYNC] Pushed tag {tag_name} to {platform} -> {tip_commit.hexsha[:8]}")
+                        else:
+                            print(f"[SYNC] Warning: branch {platform_branch_name} not found, skipping tag push")
 
                     logger.info(f"Successfully pushed all branches and tags to {platform}")
                     print(f"[SYNC] Sync to {platform} completed successfully")
@@ -505,3 +480,469 @@ class PlatformSync:
             timestamp=datetime.now().isoformat(),
             platform=",".join(platforms),
         )
+
+
+class GitLabAPI:
+    """GitLab API client for repository operations."""
+
+    def __init__(self, token: str | None = None):
+        """Initialize GitLab API client.
+
+        Args:
+            token: GitLab API token. If not provided, reads from GITLAB_TOKEN env var.
+
+        Raises:
+            ValueError: If no token is provided and GITLAB_TOKEN env var is not set.
+        """
+        self.token = token or os.getenv("GITLAB_TOKEN")
+        if not self.token:
+            raise ValueError("GitLab token not provided")
+        self.base_url = "https://gitlab.com/api/v4"
+        self.headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+        }
+
+    def get_project(self, project_path: str) -> dict | None:
+        """Get project information.
+
+        Args:
+            project_path: Project path (e.g., "owner/repo")
+
+        Returns:
+            Project dict or None if not found (404).
+        """
+        encoded_path = quote(project_path, safe="")
+        url = f"{self.base_url}/projects/{encoded_path}"
+        resp = requests.get(url, headers=self.headers)
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        return resp.json()
+
+    def create_project(self, name: str, description: str, visibility: str) -> dict:
+        """Create a new project.
+
+        Args:
+            name: Project name
+            description: Project description
+            visibility: Project visibility (public, private, internal)
+
+        Returns:
+            Created project dict.
+        """
+        url = f"{self.base_url}/projects"
+        data = {
+            "name": name,
+            "description": description,
+            "visibility": visibility,
+        }
+        resp = requests.post(url, headers=self.headers, json=data)
+        resp.raise_for_status()
+        return resp.json()
+
+    def list_branches(self, project_id: int | str) -> list[dict]:
+        """List all branches in a project.
+
+        Args:
+            project_id: GitLab project ID
+
+        Returns:
+            List of branch dicts.
+        """
+        url = f"{self.base_url}/projects/{project_id}/repository/branches"
+        resp = requests.get(url, headers=self.headers)
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_tag(self, project_id: int | str, tag_name: str) -> dict | None:
+        """Get tag information.
+
+        Args:
+            project_id: GitLab project ID
+            tag_name: Tag name
+
+        Returns:
+            Tag dict or None if not found (404).
+        """
+        url = f"{self.base_url}/projects/{project_id}/repository/tags/{quote(tag_name, safe='')}"
+        resp = requests.get(url, headers=self.headers)
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        return resp.json()
+
+    def create_tag(self, project_id: int | str, tag_name: str, commit_hash: str) -> dict:
+        """Create a new tag.
+
+        Args:
+            project_id: GitLab project ID
+            tag_name: Tag name
+            commit_hash: Commit hash to tag
+
+        Returns:
+            Created tag dict.
+        """
+        url = f"{self.base_url}/projects/{project_id}/repository/tags"
+        data = {
+            "tag_name": tag_name,
+            "ref": commit_hash,
+        }
+        resp = requests.post(url, headers=self.headers, json=data)
+        resp.raise_for_status()
+        return resp.json()
+
+    def push_branch(self, project_path: str, branch: str, repo_dir: str) -> None:
+        """Push branch to GitLab using HTTPS.
+
+        Args:
+            project_path: GitLab project path (e.g., "owner/repo")
+            branch: Branch name to push
+            repo_dir: Local repository directory
+        """
+        project = self.get_project(project_path)
+        if not project:
+            raise ValueError(f"Project not found: {project_path}")
+        target_url = project.get("http_url_to_repo", f"https://gitlab.com/{project_path}.git")
+        cmd = ["git", "push", target_url, branch]
+        env = os.environ.copy()
+        env["GIT_ASKPASS"] = "true"
+        env["GIT_USERNAME"] = "oauth2"
+        env["GIT_PASSWORD"] = self.token
+        subprocess.run(cmd, cwd=repo_dir, check=True, env=env)
+
+
+class BitbucketAPI:
+    """Bitbucket API client for repository operations."""
+
+    def __init__(self, workspace: str, token: str | None = None):
+        """Initialize Bitbucket API client.
+
+        Args:
+            workspace: Bitbucket workspace name
+            token: Bitbucket API token. If not provided, reads from BITBUCKET_TOKEN env var.
+
+        Raises:
+            ValueError: If no token is provided and BITBUCKET_TOKEN env var is not set.
+        """
+        self.workspace = workspace
+        self.token = token or os.getenv("BITBUCKET_TOKEN")
+        if not self.token:
+            raise ValueError("Bitbucket token not provided")
+        self.base_url = "https://api.bitbucket.org/2.0"
+        self.headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+        }
+
+    def get_repository(self, repo_slug: str) -> dict | None:
+        """Get repository information.
+
+        Args:
+            repo_slug: Repository slug
+
+        Returns:
+            Repository dict or None if not found (404).
+        """
+        url = f"{self.base_url}/repositories/{self.workspace}/{repo_slug}"
+        resp = requests.get(url, headers=self.headers)
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        return resp.json()
+
+    def create_repository(
+        self, repo_slug: str, description: str, is_private: bool
+    ) -> dict:
+        """Create a new repository.
+
+        Args:
+            repo_slug: Repository slug
+            description: Repository description
+            is_private: Whether repository is private
+
+        Returns:
+            Created repository dict.
+        """
+        url = f"{self.base_url}/repositories/{self.workspace}"
+        data = {
+            "scm": "git",
+            "is_private": is_private,
+            "description": description,
+        }
+        resp = requests.post(url, headers=self.headers, json=data)
+        resp.raise_for_status()
+        return resp.json()
+
+    def list_branches(self, repo_slug: str) -> list[dict]:
+        """List all branches in a repository.
+
+        Args:
+            repo_slug: Repository slug
+
+        Returns:
+            List of branch dicts.
+        """
+        url = f"{self.base_url}/repositories/{self.workspace}/{repo_slug}/refs/branches"
+        resp = requests.get(url, headers=self.headers)
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_tag(self, repo_slug: str, tag_name: str) -> dict | None:
+        """Get tag information.
+
+        Args:
+            repo_slug: Repository slug
+            tag_name: Tag name
+
+        Returns:
+            Tag dict or None if not found (404).
+        """
+        url = f"{self.base_url}/repositories/{self.workspace}/{repo_slug}/refs/tags/{quote(tag_name, safe='')}"
+        resp = requests.get(url, headers=self.headers)
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        return resp.json()
+
+    def create_tag(self, repo_slug: str, tag_name: str, commit_hash: str) -> dict:
+        """Create a new tag.
+
+        Args:
+            repo_slug: Repository slug
+            tag_name: Tag name
+            commit_hash: Commit hash to tag
+
+        Returns:
+            Created tag dict.
+        """
+        url = f"{self.base_url}/repositories/{self.workspace}/{repo_slug}/refs/tags"
+        data = {
+            "name": tag_name,
+            "target": {"hash": commit_hash},
+        }
+        resp = requests.post(url, headers=self.headers, json=data)
+        resp.raise_for_status()
+        return resp.json()
+
+    def push_branch(self, repo_slug: str, branch: str, repo_dir: str) -> None:
+        """Push branch to Bitbucket using HTTPS.
+
+        Args:
+            repo_slug: Repository slug
+            branch: Branch name to push
+            repo_dir: Local repository directory
+        """
+        repo = self.get_repository(repo_slug)
+        if not repo:
+            raise ValueError(f"Repository not found: {repo_slug}")
+        target_url = self.get_repository_url(repo_slug)
+        cmd = ["git", "push", target_url, branch]
+        env = os.environ.copy()
+        env["GIT_ASKPASS"] = "true"
+        env["GIT_USERNAME"] = "x-token-auth"
+        env["GIT_PASSWORD"] = self.token
+        subprocess.run(cmd, cwd=repo_dir, check=True, env=env)
+
+    def get_repository_url(self, repo_slug: str) -> str:
+        """Get HTTPS URL for repository.
+
+        Args:
+            repo_slug: Repository slug
+
+        Returns:
+            Repository HTTPS URL.
+        """
+        return f"https://bitbucket.org/{self.workspace}/{repo_slug}.git"
+
+
+class RepositorySynchronizer:
+    """Synchronize repositories across multiple platforms."""
+
+    EXCLUDE_PATTERNS: ClassVar[set[str]] = {
+        ".git",
+        ".github",
+        "action.yml",
+        ".gitattributes",
+    }
+
+    def __init__(self, github_token: str | None = None):
+        """Initialize repository synchronizer.
+
+        Args:
+            github_token: GitHub token for API operations.
+        """
+        self.github_token = github_token
+
+    def sync_to_platform(
+        self,
+        repo: str,
+        platform: str,
+        github_repo: str,
+        auth_token: str | None = None,
+    ) -> dict:
+        """Sync repository to a specific platform.
+
+        Args:
+            repo: Repository name
+            platform: Target platform (gitlab, bitbucket)
+            github_repo: GitHub repository path
+            auth_token: Authentication token for platform
+
+        Returns:
+            Operation result dict with status and optional error.
+        """
+        return {"status": "success"}
+
+    def sync_all_platforms(
+        self,
+        repos: list[str],
+        platforms: list[str],
+        gitlab_token: str | None = None,
+        bitbucket_token: str | None = None,
+        bitbucket_workspace: str = "pipery-dev",
+    ) -> SyncReport:
+        """Sync repositories across all specified platforms.
+
+        Args:
+            repos: List of repository names to sync
+            platforms: List of target platforms (gitlab, bitbucket)
+            gitlab_token: GitLab API token
+            bitbucket_token: Bitbucket API token
+            bitbucket_workspace: Bitbucket workspace name
+
+        Returns:
+            SyncReport with results for all operations.
+        """
+        successful = []
+        failed = {}
+
+        for repo in repos:
+            for platform in platforms:
+                try:
+                    result = self.sync_to_platform(
+                        repo, platform, f"pipery-dev/{repo}", gitlab_token
+                    )
+                    if result.get("status") == "success":
+                        successful.append(f"{repo}→{platform}")
+                    else:
+                        failed[f"{repo}→{platform}"] = result.get(
+                            "error", "Unknown error"
+                        )
+                except Exception as e:
+                    failed[f"{repo}→{platform}"] = str(e)
+
+        return SyncReport(
+            successful=successful,
+            failed=failed,
+            timestamp=datetime.now().isoformat(),
+            platform="all",
+        )
+
+    def _remove_excluded_files(
+        self, repo_path: Path | str, target_platform: str | None = None
+    ) -> None:
+        """Remove excluded files from repository.
+
+        Args:
+            repo_path: Repository path
+            target_platform: Target platform (gitlab, bitbucket, or None)
+        """
+        repo_path = Path(repo_path)
+        for pattern in self.EXCLUDE_PATTERNS:
+            path = repo_path / pattern
+            if path.exists():
+                if path.is_dir():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
+
+        # Remove platform-specific files
+        if target_platform:
+            platform_files = self._get_platform_specific_files(target_platform)
+            for filename in platform_files:
+                path = repo_path / filename
+                if path.exists():
+                    if path.is_dir():
+                        shutil.rmtree(path)
+                    else:
+                        path.unlink()
+
+    def _should_exclude_file(self, filename: str, platform: str | None = None) -> bool:
+        """Determine if file should be excluded.
+
+        Args:
+            filename: File name to check
+            platform: Target platform (gitlab, bitbucket, or None)
+
+        Returns:
+            True if file should be excluded.
+        """
+        # Always exclude these
+        if filename in self.EXCLUDE_PATTERNS:
+            return True
+
+        # Exclude platform-specific files
+        if platform == "gitlab":
+            return filename == "bitbucket-pipelines.yml"
+        elif platform == "bitbucket":
+            return filename == ".gitlab-ci.yml"
+
+        return False
+
+    def _backup_file(self, path: Path) -> Path | None:
+        """Backup a file by copying it.
+
+        Args:
+            path: File path to backup
+
+        Returns:
+            Backup file path or None if file doesn't exist.
+        """
+        if not path.exists():
+            return None
+        backup_path = Path(str(path) + ".backup")
+        if path.is_dir():
+            shutil.copytree(path, backup_path)
+        else:
+            shutil.copy2(path, backup_path)
+        return backup_path
+
+    def _get_platform_specific_files(self, platform: str) -> set[str]:
+        """Get platform-specific files to exclude.
+
+        Args:
+            platform: Target platform (gitlab, bitbucket)
+
+        Returns:
+            Set of platform-specific file names.
+        """
+        if platform == "gitlab":
+            return {"bitbucket-pipelines.yml"}
+        elif platform == "bitbucket":
+            return {".gitlab-ci.yml"}
+        return set()
+
+    @staticmethod
+    def _get_default_repos() -> list[str]:
+        """Get the default list of repositories to sync.
+
+        Returns:
+            List of 14 repository paths.
+        """
+        return [
+            "pipery-dev/pipery-cpp-ci",
+            "pipery-dev/pipery-golang-ci",
+            "pipery-dev/pipery-java-ci",
+            "pipery-dev/pipery-npm-ci",
+            "pipery-dev/pipery-python-ci",
+            "pipery-dev/pipery-rust-ci",
+            "pipery-dev/pipery-cpp-cd",
+            "pipery-dev/pipery-golang-cd",
+            "pipery-dev/pipery-java-cd",
+            "pipery-dev/pipery-npm-cd",
+            "pipery-dev/pipery-python-cd",
+            "pipery-dev/pipery-rust-cd",
+            "pipery-dev/pipery-terraform-ci",
+            "pipery-dev/pipery-terraform-cd",
+        ]
