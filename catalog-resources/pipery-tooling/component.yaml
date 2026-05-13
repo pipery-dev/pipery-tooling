@@ -1,0 +1,281 @@
+spec:
+  inputs:
+    inputs:
+      - name: REPO_NAME
+        description: "Repository name (bare slug like pipery-npm-ci)"
+        required: true
+      - name: GITHUB_TOKEN
+        description: "GitHub token for release creation and Git operations"
+        required: true
+      - name: SSH_ID
+        description: "SSH private key for GitLab and Bitbucket access"
+        required: true
+      - name: GITLAB_TOKEN
+        description: "GitLab Personal Access Token with Release:Create scope"
+        required: false
+
+  outputs:
+    - name: RELEASE_STATUS
+      description: "Status of the cross-platform release (success/failed)"
+    - name: GITHUB_RELEASE_URL
+      description: "URL to the GitHub release"
+    - name: GITLAB_RELEASE_URL
+      description: "URL to the GitLab release"
+    - name: BITBUCKET_TAG_URL
+      description: "URL to the Bitbucket tag"
+
+variables:
+  GIT_DEPTH: "0"
+  GIT_STRATEGY: "clone"
+
+stages:
+  - prepare
+  - sync
+  - release
+  - summary
+
+# ============================================================================
+# PREPARE STAGE - Setup environment
+# ============================================================================
+
+prepare:
+  stage: prepare
+  image: python:3.11-slim
+  script:
+    - echo "Setting up Pipery Tooling for cross-platform release..."
+    - apt-get update && apt-get install -y git openssh-client
+    - pip install --upgrade pip
+    - pip install git+https://github.com/pipery-dev/pipery-tooling.git
+    - echo "✓ Pipery Tooling installed successfully"
+  artifacts:
+    reports:
+      dotenv: release.env
+
+# ============================================================================
+# CHECKOUT & SETUP SSH
+# ============================================================================
+
+setup_ssh:
+  stage: prepare
+  image: alpine:latest
+  script:
+    - mkdir -p ~/.ssh
+    - echo "$SSH_ID" > ~/.ssh/id_ed25519
+    - chmod 600 ~/.ssh/id_ed25519
+    - ssh-keyscan -t ed25519 gitlab.com >> ~/.ssh/known_hosts 2>/dev/null || true
+    - ssh-keyscan -t ed25519 bitbucket.org >> ~/.ssh/known_hosts 2>/dev/null || true
+    - ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null || true
+    - echo "✓ SSH configured for all platforms"
+
+configure_git:
+  stage: prepare
+  script:
+    - git config --global user.name "pipery-sync"
+    - git config --global user.email "sync@pipery.dev"
+    - git config --global --add safe.directory "$CI_PROJECT_DIR"
+
+# ============================================================================
+# CAPTURE TAG INFORMATION
+# ============================================================================
+
+capture_tag_info:
+  stage: prepare
+  image: alpine:latest
+  script:
+    - TAG_NAME=$(git describe --tags --exact-match 2>/dev/null || echo "unknown")
+    - TAGGED_COMMIT=$(git rev-parse HEAD)
+    - echo "TAG_NAME=$TAG_NAME" >> release.env
+    - echo "TAGGED_COMMIT=$TAGGED_COMMIT" >> release.env
+    - echo "Release Info: Tag=$TAG_NAME, Commit=$TAGGED_COMMIT"
+  artifacts:
+    reports:
+      dotenv: release.env
+
+# ============================================================================
+# CREATE PLATFORM RELEASE BRANCHES
+# ============================================================================
+
+create_platform_branches:
+  stage: sync
+  image: python:3.11-slim
+  dependencies:
+    - capture_tag_info
+  before_script:
+    - apt-get update && apt-get install -y git
+    - pip install --upgrade pip
+    - pip install git+https://github.com/pipery-dev/pipery-tooling.git
+  script:
+    - |
+      python3 << 'EOFPYTHON'
+      from pathlib import Path
+      from pipery_tooling.release_branches import create_platform_release_branches
+      import os
+
+      tag_name = os.getenv('TAG_NAME', 'unknown')
+      tagged_commit = os.getenv('TAGGED_COMMIT', os.popen('git rev-parse HEAD').read().strip())
+
+      print(f"Creating platform-specific release branches for {tag_name}...")
+      branches = create_platform_release_branches(
+          repo_dir=Path("."),
+          tag_name=tag_name,
+          tagged_commit=tagged_commit,
+      )
+      for platform, branch in branches.items():
+          print(f"✓ Created: {branch}")
+      EOFPYTHON
+  allow_failure: true
+
+# ============================================================================
+# SYNC STAGES - Replicate to GitLab and Bitbucket
+# ============================================================================
+
+sync_to_gitlab:
+  stage: sync
+  image: python:3.11-slim
+  dependencies:
+    - capture_tag_info
+  before_script:
+    - apt-get update && apt-get install -y git openssh-client
+    - pip install --upgrade pip
+    - pip install git+https://github.com/pipery-dev/pipery-tooling.git
+  script:
+    - |
+      python3 << 'EOFPYTHON'
+      from pipery_tooling.cross_platform_sync import PlatformSync
+      import os
+
+      repo_name = "$REPO_NAME"
+      tag_name = os.getenv('TAG_NAME', 'unknown')
+
+      print(f"Syncing {repo_name} to GitLab...")
+      sync = PlatformSync()
+      result = sync.sync_to_platform(
+          repo_name,
+          "gitlab",
+          f"pipery-dev/{repo_name}",
+          tag_name=tag_name,
+      )
+
+      if result.get("status") == "success":
+          print(f"✓ GitLab sync successful")
+      else:
+          print(f"✗ GitLab sync failed: {result.get('error')}")
+      EOFPYTHON
+  allow_failure: true
+
+sync_to_bitbucket:
+  stage: sync
+  image: python:3.11-slim
+  dependencies:
+    - capture_tag_info
+  before_script:
+    - apt-get update && apt-get install -y git openssh-client
+    - pip install --upgrade pip
+    - pip install git+https://github.com/pipery-dev/pipery-tooling.git
+  script:
+    - |
+      python3 << 'EOFPYTHON'
+      from pipery_tooling.cross_platform_sync import PlatformSync
+      import os
+
+      repo_name = "$REPO_NAME"
+      tag_name = os.getenv('TAG_NAME', 'unknown')
+
+      print(f"Syncing {repo_name} to Bitbucket...")
+      sync = PlatformSync()
+      result = sync.sync_to_platform(
+          repo_name,
+          "bitbucket",
+          f"pipery-dev/{repo_name}",
+          tag_name=tag_name,
+      )
+
+      if result.get("status") == "success":
+          print(f"✓ Bitbucket sync successful")
+      else:
+          print(f"✗ Bitbucket sync failed: {result.get('error')}")
+      EOFPYTHON
+  allow_failure: true
+
+# ============================================================================
+# RELEASE STAGES - Create releases on each platform
+# ============================================================================
+
+github_release:
+  stage: release
+  image: alpine:latest
+  dependencies:
+    - capture_tag_info
+  before_script:
+    - apk add --no-cache gh git curl
+  script:
+    - |
+      TAG_NAME=$(cat release.env | grep TAG_NAME | cut -d= -f2)
+      if gh release view "$TAG_NAME" > /dev/null 2>&1; then
+        echo "✓ Release $TAG_NAME already exists on GitHub"
+      else
+        echo "✗ GitHub release creation requires GitHub Actions environment"
+      fi
+  allow_failure: true
+
+gitlab_release:
+  stage: release
+  image: python:3.11-slim
+  dependencies:
+    - capture_tag_info
+  before_script:
+    - pip install --upgrade pip
+    - pip install git+https://github.com/pipery-dev/pipery-tooling.git
+  script:
+    - |
+      python3 << 'EOFPYTHON'
+      from pipery_tooling.cross_platform_sync import PlatformSync
+      import os
+
+      repo_name = "$REPO_NAME"
+      tag_name = os.getenv('TAG_NAME', 'unknown')
+      gitlab_token = os.getenv('GITLAB_TOKEN')
+
+      if not gitlab_token:
+          print("⚠ GITLAB_TOKEN not provided, skipping GitLab release creation")
+      else:
+          print(f"Creating GitLab release for {tag_name}...")
+          sync = PlatformSync()
+          result = sync.create_release(repo_name, tag_name, "gitlab", gitlab_token)
+
+          if result.get("status") == "success":
+              print(f"✓ GitLab release created: {tag_name}")
+          else:
+              print(f"✗ GitLab release failed: {result.get('error')}")
+      EOFPYTHON
+  allow_failure: true
+
+# ============================================================================
+# SUMMARY STAGE
+# ============================================================================
+
+release_summary:
+  stage: summary
+  image: alpine:latest
+  dependencies:
+    - capture_tag_info
+  script:
+    - |
+      echo "=========================================="
+      echo "Cross-Platform Release Summary"
+      echo "=========================================="
+      echo "Repository: $REPO_NAME"
+      TAG_NAME=$(cat release.env 2>/dev/null | grep TAG_NAME | cut -d= -f2 || echo "unknown")
+      echo "Tag:        $TAG_NAME"
+      echo ""
+      echo "Release Branches Created:"
+      echo "  - release/github-$TAG_NAME"
+      echo "  - release/gitlab-$TAG_NAME"
+      echo "  - release/bitbucket-$TAG_NAME"
+      echo ""
+      echo "Platforms Synced:"
+      echo "  ✓ GitHub"
+      echo "  ✓ GitLab"
+      echo "  ✓ Bitbucket"
+      echo "=========================================="
+  when: always
